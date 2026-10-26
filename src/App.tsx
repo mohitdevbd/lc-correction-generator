@@ -441,20 +441,33 @@ export function App() {
       </main>
 
       {/* Footer Info */}
-      <footer className="border-t border-slate-200/80 bg-white py-4 mt-8">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 flex flex-col sm:flex-row items-center justify-between gap-2 text-xs text-slate-500">
-          <div className="flex items-center space-x-2">
+      <footer className="border-t border-slate-200/80 bg-white py-5 mt-10">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 flex flex-col md:flex-row items-center justify-between gap-3 text-xs text-slate-500">
+          <div className="flex flex-wrap items-center justify-center md:justify-start gap-x-2 gap-y-1">
             <span className="font-semibold text-slate-700">LC Correction Generator</span>
-            <span>•</span>
+            <span className="hidden sm:inline">•</span>
             <span>Textile Commercial & Export Department Tool</span>
           </div>
-          <div className="flex items-center space-x-4">
-            <span className="text-emerald-700 font-medium">✓ Scenario A & B Multiple LC Enabled</span>
+
+          <div className="flex flex-wrap items-center justify-center gap-x-4 gap-y-1">
+            <span className="text-slate-600">
+              Developed with <span className="text-rose-500 inline-block animate-pulse">❤️</span> by{' '}
+              <a
+                href="https://www.linkedin.com/in/mohitbd/"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="font-semibold text-blue-600 hover:text-blue-800 hover:underline transition-colors"
+                title="View LinkedIn Profile"
+              >
+                Md. Shikander Sarker Mohit
+              </a>
+            </span>
+            <span className="text-slate-300 hidden sm:inline">|</span>
             <button
               onClick={() => setIsSettingsOpen(true)}
-              className="text-blue-600 hover:underline"
+              className="text-slate-500 hover:text-blue-600 transition-colors"
             >
-              Configure Office Defaults
+              Office Settings
             </button>
           </div>
         </div>
