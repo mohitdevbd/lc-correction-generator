@@ -444,9 +444,9 @@ export function App() {
       <footer className="border-t border-slate-200/80 bg-white py-5 mt-10">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 flex flex-col md:flex-row items-center justify-between gap-3 text-xs text-slate-500">
           <div className="flex flex-wrap items-center justify-center md:justify-start gap-x-2 gap-y-1">
-            <span className="font-semibold text-slate-700">LC Correction Generator</span>
+            <span className="font-bold text-slate-800">LCMailer</span>
             <span className="hidden sm:inline">•</span>
-            <span>Textile Commercial & Export Department Tool</span>
+            <span>Automated LC Correction & Email Studio</span>
           </div>
 
           <div className="flex flex-wrap items-center justify-center gap-x-4 gap-y-1">
@@ -456,7 +456,7 @@ export function App() {
                 href="https://www.linkedin.com/in/mohitbd/"
                 target="_blank"
                 rel="noopener noreferrer"
-                className="font-semibold text-blue-600 hover:text-blue-800 hover:underline transition-colors"
+                className="font-semibold text-indigo-600 hover:text-indigo-800 hover:underline transition-colors"
                 title="View LinkedIn Profile"
               >
                 Md. Shikander Sarker Mohit
@@ -465,7 +465,7 @@ export function App() {
             <span className="text-slate-300 hidden sm:inline">|</span>
             <button
               onClick={() => setIsSettingsOpen(true)}
-              className="text-slate-500 hover:text-blue-600 transition-colors"
+              className="text-slate-500 hover:text-indigo-600 transition-colors"
             >
               Office Settings
             </button>
