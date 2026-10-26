@@ -25,10 +25,40 @@ export async function extractTextFromPdf(file: File): Promise<string> {
   for (let pageNum = 1; pageNum <= numPages; pageNum++) {
     const page = await pdfDocument.getPage(pageNum);
     const textContent = await page.getTextContent();
-    const pageString = textContent.items
-      .map((item: any) => item.str || '')
-      .join(' ');
-    pageTexts.push(pageString);
+    
+    // Group text items by their vertical position (y coordinate) to preserve lines
+    const items = textContent.items as Array<any>;
+    if (!items || items.length === 0) continue;
+
+    // Sort items top-to-bottom, left-to-right
+    const sorted = [...items].sort((a, b) => {
+      const yDiff = (b.transform?.[5] || 0) - (a.transform?.[5] || 0);
+      if (Math.abs(yDiff) > 4) return yDiff;
+      return (a.transform?.[4] || 0) - (b.transform?.[4] || 0);
+    });
+
+    const lines: string[] = [];
+    let currentY = sorted[0]?.transform?.[5];
+    let currentLine: string[] = [];
+
+    for (const item of sorted) {
+      const y = item.transform?.[5] || 0;
+      if (Math.abs(y - currentY) > 4) {
+        if (currentLine.length > 0) {
+          lines.push(currentLine.join(' '));
+        }
+        currentLine = [];
+        currentY = y;
+      }
+      if (item.str && item.str.trim()) {
+        currentLine.push(item.str.trim());
+      }
+    }
+    if (currentLine.length > 0) {
+      lines.push(currentLine.join(' '));
+    }
+
+    pageTexts.push(lines.join('\n'));
   }
 
   return pageTexts.join('\n\n--- PAGE BREAK ---\n\n');
@@ -43,9 +73,24 @@ export function auditLcText(text: string, settings?: UserSettings): LcAuditResul
 
   // 1. Extract Core Metadata
   const detectedLcNumber = extractLcNumber(normalizedText);
-  const detectedIssueDate = extractDate(normalizedText, /(?::31C:|F31C:[^\n]*Date[^\n]*Issue|ISSUE\s*DATE|DATE\s*OF\s*ISSUE)[^\n:]*[:#]?\s*([0-9A-Za-z\/\-\. ]{6,30})/i);
-  const detectedExpiryDate = extractDate(normalizedText, /(?::31D:|F31D:[^\n]*Date[^\n]*Expiry|EXPIRY\s*DATE|DATE\s*OF\s*EXPIRY|Date:\s*\d{6})[^\n:]*[:#]?\s*([0-9A-Za-z\/\-\. ]{6,30})/i);
-  const detectedShipmentDate = extractDate(normalizedText, /(?::44C:|F44C:[^\n]*Shipment|LATEST\s*SHIPMENT|SHIPMENT\s*DATE|LATEST\s*DATE\s*OF\s*SHIPMENT)[^\n:]*[:#]?\s*([0-9A-Za-z\/\-\. ]{6,30})/i);
+  
+  // Issue date (Tag 31C or F31C)
+  const detectedIssueDate = extractDate(
+    normalizedText,
+    /(?::31C:|F31C:[^\n]*Date[^\n]*Issue|ISSUE\s*DATE|DATE\s*OF\s*ISSUE)[^\n:]*[:#]?\s*([0-9A-Za-z\/\-\. ]{6,40})/i
+  );
+
+  // Expiry date (Tag 31D or F31D)
+  const detectedExpiryDate = extractDate(
+    normalizedText,
+    /(?::31D:|F31D:[^\n]*Date[^\n]*Expiry|EXPIRY\s*DATE|DATE\s*OF\s*EXPIRY)[^\n:]*[:#]?\s*(?:Place:[^\n]*\n)?(?:Date:)?\s*([0-9A-Za-z\/\-\. ]{6,40})/i
+  );
+
+  // Latest Shipment date (Tag 44C or F44C)
+  const detectedShipmentDate = extractDate(
+    normalizedText,
+    /(?::44C:|F44C:[^\n]*Latest\s*Date\s*of\s*Shipment|F44C:[^\n]*Shipment|LATEST\s*DATE\s*OF\s*SHIPMENT|LATEST\s*SHIPMENT|SHIPMENT\s*DATE)[^\n:]*[:#]?\s*([0-9A-Za-z\/\-\. ]{6,40})/i
+  );
   
   // Extract currency and amount
   const { currency: detectedCurrency, amount: detectedAmount } = extractAmount(normalizedText);
@@ -374,7 +419,17 @@ function extractDate(text: string, regex: RegExp): string | undefined {
   
   // Clean raw capture
   const captured = match[1].trim();
-  // Look for 6-digit YYMMDD or 8-digit YYYYMMDD or text like 2026 Oct 26
+
+  // Pattern: YYMMDD followed by YYYY Month DD (e.g. "261010 2026 Oct 10" or "261206 2026 Dec 06")
+  const ymdText = captured.match(/\b(20\d{2})\s+([A-Za-z]{3})\s+(\d{1,2})\b/);
+  if (ymdText) {
+    const year = ymdText[1];
+    const monthStr = ymdText[2];
+    const day = ymdText[3].padStart(2, '0');
+    return `${day} ${monthStr} ${year}`;
+  }
+
+  // Look for 6-digit YYMMDD
   const sixDigit = captured.match(/\b(\d{6})\b/);
   if (sixDigit) {
     const rawDate = sixDigit[1];
@@ -384,16 +439,8 @@ function extractDate(text: string, regex: RegExp): string | undefined {
     return `${day}/${month}/${year}`;
   }
 
-  const ymdText = captured.match(/\b(20\d{2})\s+([A-Za-z]{3})\s+(\d{1,2})\b/);
-  if (ymdText) {
-    const year = ymdText[1];
-    const monthStr = ymdText[2];
-    const day = ymdText[3].padStart(2, '0');
-    return `${day} ${monthStr} ${year}`;
-  }
-
   const rawDate = captured.split(/\s+/)[0];
-  return rawDate;
+  return rawDate && rawDate.length >= 6 ? rawDate : undefined;
 }
 
 function parseFlexibleDate(dateStr: string): Date | null {
@@ -420,8 +467,8 @@ function parseFlexibleDate(dateStr: string): Date | null {
 }
 
 function extractAmount(text: string): { currency?: string; amount?: string } {
-  // SWIFT Tag 32B or F32B
-  const match32B = text.match(/(?::32B:|F32B:[^\n]*Currency[^\n]*)\s*([A-Z]{3})[\s\S]{0,40}?([0-9,.]+)/i);
+  // SWIFT Tag 32B or F32B (handling format like: Currency: USD Amount: 54450,00)
+  const match32B = text.match(/(?::32B:|F32B:[^\n]*Currency[^\n]*)\s*(?:Currency:)?\s*([A-Z]{3})[\s\S]{0,60}?(?:Amount:\s*)?([0-9,.]+)/i);
   if (match32B) {
     return {
       currency: match32B[1].toUpperCase(),
