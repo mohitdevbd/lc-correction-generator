@@ -155,27 +155,24 @@ export function auditLcText(text: string, settings?: UserSettings): LcAuditResul
   // ==========================================
   // RULE 2: Discrepancy & Payment Charges Revision
   // ==========================================
-  // Parse LC Value to check tiered discrepancy limits (e.g. Bank Asia: USD 30 for < 15,000 and USD 50 for >= 15,000)
-  const numericLcAmount = detectedAmount ? parseFloat(detectedAmount.replace(/,/g, '')) : 0;
-
-  // Check for tiered discrepancy clause: "USD 30.00 (LESS THAN... 15,000) AND USD 50.00 (DOCUMENT VALUE 15,000 AND ABOVE)"
-  const tieredDiscMatch = normalizedText.match(/DISCREPANCY\s+(?:FEE|CHARGE)[^\n.]*?(?:USD|EUR)?\s*(\d+(?:\.\d{2})?)[^\n.]*?LESS\s+THAN[^\n.]*?15,?000[^\n.]*?AND\s+(?:USD|EUR)?\s*(\d+(?:\.\d{2})?)[^\n.]*?15,?000\s+AND\s+ABOVE/i);
-  
+  // LC-তে ঠিক যা লেখা আছে হুবহু রিড করবে:
+  // ১) যদি কোনো স্ল্যাব বা ব্র্যাকেট শর্ত থাকে (e.g. "USD 30.00 (LESS THAN... 15,000) AND USD 50.00 (DOCUMENT VALUE 15,000 AND ABOVE)")
+  //    তাহলে এলসি টেক্সট অনুযায়ী সর্বোচ্চ/প্রধান প্রযোজ্য ফি (যেমন USD 50.00) রিড করবে।
+  // ২) সাধারণ ক্লজে (e.g. "DISCREPANCY CHARGES USD 100.00" বা "USD 50.00") থাকলে সরাসরি সেই অ্যামাউন্ট রিড করবে।
   let discAmt = 0;
   let discStr = '';
 
-  if (tieredDiscMatch) {
-    const lowerDisc = tieredDiscMatch[1];
-    const higherDisc = tieredDiscMatch[2];
-    // If LC value is 15,000 or more (in this LC it is USD 184,250.00), the applicable fee is USD 50.00
-    if (numericLcAmount >= 15000 || !numericLcAmount) {
-      discStr = higherDisc;
-      discAmt = parseFloat(higherDisc);
-    } else {
-      discStr = lowerDisc;
-      discAmt = parseFloat(lowerDisc);
-    }
+  // Check if multiple amounts mentioned in discrepancy clause (e.g. USD 30.00 and USD 50.00)
+  const discMultiMatch = normalizedText.match(/DISCREPA[A-Z]*\s*(?:FEE|CHARGE|CHARGES)?[\s\S]{0,160}?USD\s*(\d+(?:\.\d{2})?)[\s\S]{0,80}?USD\s*(\d+(?:\.\d{2})?)/i);
+  if (discMultiMatch) {
+    const val1 = parseFloat(discMultiMatch[1]);
+    const val2 = parseFloat(discMultiMatch[2]);
+    // Pick the maximum discrepancy fee mentioned in the clause (e.g. 50.00)
+    const maxVal = Math.max(val1, val2);
+    discAmt = maxVal;
+    discStr = maxVal.toFixed(2);
   } else {
+    // Single discrepancy fee mentioned in LC
     const discFeeMatch = normalizedText.match(/(?:DISCREPA[A-Z]*\s*(?:FEE|CHARGE|CHARGES)?\s*(?:OF|IS|:)?\s*(?:USD|EUR|GBP)?\s*(\d+(?:\.\d{2})?)|(?:USD|EUR|GBP)\s*(\d+(?:\.\d{2})?)\s*(?:PER|FOR EACH)?\s*DISCREPA[A-Z]*)/i);
     if (discFeeMatch) {
       discStr = discFeeMatch[1] || discFeeMatch[2];
