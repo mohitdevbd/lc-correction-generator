@@ -155,13 +155,32 @@ export function auditLcText(text: string, settings?: UserSettings): LcAuditResul
   // ==========================================
   // RULE 2: Discrepancy & Payment Charges Revision
   // ==========================================
-  const discFeeMatch = normalizedText.match(/(?:DISCREPA[A-Z]*\s*(?:FEE|CHARGE|CHARGES)?\s*(?:OF|IS|:)?\s*(?:USD|EUR|GBP)?\s*(\d+(?:\.\d{2})?)|(?:USD|EUR|GBP)\s*(\d+(?:\.\d{2})?)\s*(?:PER|FOR EACH)?\s*DISCREPA[A-Z]*)/i);
+  // Parse LC Value to check tiered discrepancy limits (e.g. Bank Asia: USD 30 for < 15,000 and USD 50 for >= 15,000)
+  const numericLcAmount = detectedAmount ? parseFloat(detectedAmount.replace(/,/g, '')) : 0;
+
+  // Check for tiered discrepancy clause: "USD 30.00 (LESS THAN... 15,000) AND USD 50.00 (DOCUMENT VALUE 15,000 AND ABOVE)"
+  const tieredDiscMatch = normalizedText.match(/DISCREPANCY\s+(?:FEE|CHARGE)[^\n.]*?(?:USD|EUR)?\s*(\d+(?:\.\d{2})?)[^\n.]*?LESS\s+THAN[^\n.]*?15,?000[^\n.]*?AND\s+(?:USD|EUR)?\s*(\d+(?:\.\d{2})?)[^\n.]*?15,?000\s+AND\s+ABOVE/i);
+  
   let discAmt = 0;
   let discStr = '';
 
-  if (discFeeMatch) {
-    discStr = discFeeMatch[1] || discFeeMatch[2];
-    discAmt = parseFloat(discStr);
+  if (tieredDiscMatch) {
+    const lowerDisc = tieredDiscMatch[1];
+    const higherDisc = tieredDiscMatch[2];
+    // If LC value is 15,000 or more (in this LC it is USD 184,250.00), the applicable fee is USD 50.00
+    if (numericLcAmount >= 15000 || !numericLcAmount) {
+      discStr = higherDisc;
+      discAmt = parseFloat(higherDisc);
+    } else {
+      discStr = lowerDisc;
+      discAmt = parseFloat(lowerDisc);
+    }
+  } else {
+    const discFeeMatch = normalizedText.match(/(?:DISCREPA[A-Z]*\s*(?:FEE|CHARGE|CHARGES)?\s*(?:OF|IS|:)?\s*(?:USD|EUR|GBP)?\s*(\d+(?:\.\d{2})?)|(?:USD|EUR|GBP)\s*(\d+(?:\.\d{2})?)\s*(?:PER|FOR EACH)?\s*DISCREPA[A-Z]*)/i);
+    if (discFeeMatch) {
+      discStr = discFeeMatch[1] || discFeeMatch[2];
+      discAmt = parseFloat(discStr);
+    }
   }
 
   // Also check for payment / reimbursement / settlement charges anywhere in LC (including Field 78 / F78)
@@ -380,7 +399,7 @@ export function auditLcText(text: string, settings?: UserSettings): LcAuditResul
   if (
     chargesBlock &&
     (chargesBlock.includes('DISCREPANCY') || chargesBlock.includes('PAYMENT CHARGE')) &&
-    !discFeeMatch && !payFeeMatch
+    !discStr && !payStr
   ) {
     const unspecSnippet = extractSnippet(normalizedText, /(?:INCLUDING|AND)[\s\S]{0,80}(?:PAYMENT|DISCREPANCY)[\s\S]{0,80}BENEFICIARY/i) ||
                           extractSnippet(normalizedText, /:71D:[\s\S]{0,120}/i);
