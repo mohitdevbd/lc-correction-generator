@@ -393,25 +393,32 @@ export function auditLcText(text: string, settings?: UserSettings): LcAuditResul
   // ==========================================
   // RULE 7E: Missing Overdue Interest Clause Check
   // ==========================================
-  // For Usance/Deferred LCs (e.g. 120 Days from acceptance), an overdue interest clause
+  // For Usance/Deferred LCs (e.g. 120 Days from acceptance, 120 Days Sight, etc.), an overdue interest clause
   // (e.g., "Overdue interest will be paid at LIBOR/SOFR rate from maturity") should be included as per PI terms.
-  const isUsanceDeferred = /\b(?:60|90|120|150|180)\s*DAYS\b/i.test(normalizedText) ||
+  const isUsanceDeferred = /\b(?:30|60|90|120|150|180)\s*DAYS\b/i.test(normalizedText) ||
                            upper.includes('FROM THE DATE OF ACCEPTANCE') ||
-                           upper.includes('AFTER ACCEPTANCE');
+                           upper.includes('AFTER ACCEPTANCE') ||
+                           upper.includes('FROM THE DATE OF DELIVERY') ||
+                           upper.includes('SIGHT FROM THE DATE');
 
-  const hasOverdueClause = upper.includes('OVERDUE INTEREST') ||
-                           upper.includes('OVERDUE CHARGE') ||
-                           upper.includes('OVERDUE CLAUSE') ||
-                           (upper.includes('OVERDUE') && upper.includes('RATE'));
+  // Check if there is an actual Overdue clause in LC conditions (F47A or text)
+  // Ignore footer metadata strings like "Delivery overdue warning request"
+  const relevantLcBody = normalizedText.replace(/Delivery\s*overdue\s*warning\s*request/gi, '');
+  const upperBody = relevantLcBody.toUpperCase();
+
+  const hasOverdueClause = upperBody.includes('OVERDUE INTEREST') ||
+                           upperBody.includes('OVERDUE CHARGE') ||
+                           upperBody.includes('OVERDUE CLAUSE') ||
+                           (upperBody.includes('OVERDUE') && (upperBody.includes('RATE') || upperBody.includes('PAY') || upperBody.includes('MATURITY')));
 
   if (isUsanceDeferred && !hasOverdueClause) {
     issues.push({
       id: 'issue_missing_overdue_clause',
       correctionId: 'overdue_clause',
-      title: 'Missing Overdue Interest Clause (Deferred 120 Days LC)',
+      title: 'Missing Overdue Interest Clause (Deferred Usance LC)',
       severity: 'warning',
-      reason: 'This LC has a 120 Days deferred usance tenor, but does not contain any overdue interest clause. If the buyer or issuing bank delays payment beyond maturity, no interest penalty can be claimed without this clause.',
-      detectedText: '120 DAYS FROM THE DATE OF ACCEPTANCE (No overdue interest clause found in Field 47A)'
+      reason: 'This LC has a deferred usance tenor, but does not contain any overdue interest clause. If the buyer or issuing bank delays payment beyond maturity, no overdue interest penalty can be claimed without this clause.',
+      detectedText: 'Deferred tenor detected (No overdue interest clause found in LC conditions)'
     });
   }
 
