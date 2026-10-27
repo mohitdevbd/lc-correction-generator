@@ -164,24 +164,34 @@ export function auditLcText(text: string, settings?: UserSettings): LcAuditResul
     discAmt = parseFloat(discStr);
   }
 
-  // Also check for payment charges
-  const payFeeMatch = normalizedText.match(/(?:PAYMENT|REIMBURSEMENT)\s*(?:CHARGE|COMMISSION|FEE)\s*(?:OF|IS|:)?\s*(?:USD|EUR|GBP)?\s*(\d+(?:\.\d{2})?)/i);
+  // Also check for payment / reimbursement / settlement charges anywhere in LC (including Field 78 / F78)
+  // e.g. "WE WILL DEDUCT PAYMENT CHARGE USD 30.00 FROM PROCEEDS" or "PAYMENT CHARGE USD 50.00"
+  const payFeeMatch = normalizedText.match(/(?:(?:DEDUCT\s+)?PAYMENT\s+CHARGE[S]?\s+(?:OF\s+)?(?:USD|EUR|GBP)?\s*(\d+(?:\.\d{2})?)|(?:PAYMENT|REIMBURSEMENT|SETTLEMENT)\s*(?:CHARGE|COMMISSION|FEE)\s*(?:OF|IS|:)?\s*(?:USD|EUR|GBP)?\s*(\d+(?:\.\d{2})?))/i);
   let payStr = '';
+  let payAmt = 0;
   if (payFeeMatch) {
-    payStr = payFeeMatch[1];
+    payStr = payFeeMatch[1] || payFeeMatch[2];
+    payAmt = parseFloat(payStr || '0');
   }
 
-  if (discAmt > 30 || parseFloat(payStr || '0') > 30) {
+  // Flag if discrepancy charge > 30 or payment charge >= 25 (or deduction mentioned in F78)
+  const hasF78PaymentDeduction = /DEDUCT\s+PAYMENT\s+CHARGE/i.test(normalizedText) ||
+                                /PAYMENT\s+CHARGE[\s\S]{0,30}FROM\s+PROCEEDS/i.test(normalizedText);
+
+  if (discAmt > 30 || payAmt >= 25 || hasF78PaymentDeduction) {
+    const snippet = extractSnippet(normalizedText, /(?:DEDUCT\s+PAYMENT\s+CHARGE[^\n.]*|PAYMENT\s+CHARGE\s+USD\s*\d+[^\n.]*|DISCREPANCY\s+(?:FEE|CHARGE)[^\n.]*)/i);
     issues.push({
       id: 'issue_discrepancy_revision',
       correctionId: 'discrepancy_payment_charges_revision',
-      title: 'Excessive Discrepancy / Payment Charges',
+      title: 'Payment Charge Deduction / Excessive Charges',
       severity: 'warning',
-      reason: `The LC states discrepancy fee of USD ${discStr || '75.00'} (and payment charge USD ${payStr || '50.00'}), which is significantly above the acceptable standard (USD 25.00 / 25.00).`,
-      detectedText: extractSnippet(normalizedText, /DISCREPA[^\n.]{0,100}/i) || undefined,
+      reason: payStr
+        ? `The LC states a payment charge of USD ${payStr} will be deducted from bill proceeds (Field 78/47A). Payment processing charges should either be waived, capped at acceptable limit (USD 25.00), or borne by the applicant.`
+        : `Discrepancy / payment charges in LC are above standard acceptable rates.`,
+      detectedText: snippet || (payStr ? `Deduct payment charge USD ${payStr} from proceeds` : undefined),
       suggestedDetails: {
-        discrepancyChargeInLc: discStr || '75.00',
-        paymentChargeInLc: payStr || '50.00',
+        discrepancyChargeInLc: discStr || '50.00',
+        paymentChargeInLc: payStr || '30.00',
         acceptableDiscrepancyCharge: '25.00',
         acceptablePaymentCharge: '25.00'
       }
