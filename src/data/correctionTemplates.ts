@@ -30,15 +30,15 @@ export const CORRECTION_TEMPLATES: CorrectionTemplate[] = [
     relevantFields: ['currentTenor', 'requiredTenor'],
     emailTemplate: (details) => {
       if (details.requiredTenor?.trim()) {
-        return `Please clearly specify the payment terms in the LC as: ${details.requiredTenor.trim()}.`;
+        return `Please add a payment clause in the LC as per the agreed terms/PI: "${details.requiredTenor.trim()}".`;
       }
-      return 'Please specify the payment terms clearly in the LC.';
+      return 'Please add a payment clause in the LC as per the agreed terms/PI.';
     },
     messageTemplate: (details) => {
       if (details.requiredTenor?.trim()) {
-        return `Specify payment terms as: ${details.requiredTenor.trim()}.`;
+        return `Add payment clause as per agreed terms/PI: ${details.requiredTenor.trim()}.`;
       }
-      return 'Specify payment terms clearly in LC.';
+      return 'Add payment clause in the LC as per the agreed terms/PI.';
     }
   },
   {
