@@ -362,6 +362,80 @@ export function auditLcText(text: string, settings?: UserSettings): LcAuditResul
   }
 
   // ==========================================
+  // RULE 7D: Unspecified / Open-Ended Discrepancy & Payment Charges (Field 71D)
+  // ==========================================
+  // In many LCs (like UCB, Jamuna, etc.), Field 71D says:
+  // "ALL CHARGES OUTSIDE OUR COUNTER INCLUDING PAYMENT CHARGE AND DISCREPANCY CHARGE ARE ON BENEFICIARY'S ACCOUNT"
+  // without specifying the exact dollar limit (e.g., USD 25.00). This allows the bank to deduct arbitrary or high fees.
+  if (
+    chargesBlock &&
+    (chargesBlock.includes('DISCREPANCY') || chargesBlock.includes('PAYMENT CHARGE')) &&
+    !discFeeMatch && !payFeeMatch
+  ) {
+    const unspecSnippet = extractSnippet(normalizedText, /(?:INCLUDING|AND)[\s\S]{0,80}(?:PAYMENT|DISCREPANCY)[\s\S]{0,80}BENEFICIARY/i) ||
+                          extractSnippet(normalizedText, /:71D:[\s\S]{0,120}/i);
+    issues.push({
+      id: 'issue_unspecified_charges',
+      correctionId: 'discrepancy_payment_charges_revision',
+      title: 'Uncapped Discrepancy & Payment Charges in Field 71D',
+      severity: 'warning',
+      reason: 'Field 71D places Payment & Discrepancy charges on the Beneficiary without defining acceptable limits. They must be capped at standard rates (e.g., USD 25.00 for discrepancy & USD 25.00 for payment).',
+      detectedText: unspecSnippet || 'Payment charge and discrepancy charge are on beneficiary account without fixed amount.',
+      suggestedDetails: {
+        discrepancyChargeInLc: 'Unspecified',
+        paymentChargeInLc: 'Unspecified',
+        acceptableDiscrepancyCharge: '25.00',
+        acceptablePaymentCharge: '25.00'
+      }
+    });
+  }
+
+  // ==========================================
+  // RULE 7E: Missing Overdue Interest Clause Check
+  // ==========================================
+  // For Usance/Deferred LCs (e.g. 120 Days from acceptance), an overdue interest clause
+  // (e.g., "Overdue interest will be paid at LIBOR/SOFR rate from maturity") should be included as per PI terms.
+  const isUsanceDeferred = /\b(?:60|90|120|150|180)\s*DAYS\b/i.test(normalizedText) ||
+                           upper.includes('FROM THE DATE OF ACCEPTANCE') ||
+                           upper.includes('AFTER ACCEPTANCE');
+
+  const hasOverdueClause = upper.includes('OVERDUE INTEREST') ||
+                           upper.includes('OVERDUE CHARGE') ||
+                           upper.includes('OVERDUE CLAUSE') ||
+                           (upper.includes('OVERDUE') && upper.includes('RATE'));
+
+  if (isUsanceDeferred && !hasOverdueClause) {
+    issues.push({
+      id: 'issue_missing_overdue_clause',
+      correctionId: 'overdue_clause',
+      title: 'Missing Overdue Interest Clause (Deferred 120 Days LC)',
+      severity: 'warning',
+      reason: 'This LC has a 120 Days deferred usance tenor, but does not contain any overdue interest clause. If the buyer or issuing bank delays payment beyond maturity, no interest penalty can be claimed without this clause.',
+      detectedText: '120 DAYS FROM THE DATE OF ACCEPTANCE (No overdue interest clause found in Field 47A)'
+    });
+  }
+
+  // ==========================================
+  // RULE 7F: Missing Payment Settlement / RTGS Term Clarification
+  // ==========================================
+  // If payment clause does not specify interest rate/payment conditions clearly
+  const hasPaymentInterestClause = upper.includes('INTEREST WILL BE PAID') ||
+                                   upper.includes('INTEREST FOR USANCE') ||
+                                   upper.includes('SOFR') ||
+                                   upper.includes('LIBOR');
+
+  if (isUsanceDeferred && !hasPaymentInterestClause) {
+    issues.push({
+      id: 'issue_missing_payment_clause',
+      correctionId: 'payment_clause',
+      title: 'Missing Usance Interest / Payment Terms Clause',
+      severity: 'info',
+      reason: 'The LC specifies a 120-day tenor but lacks specific payment terms regarding who pays the usance interest (Applicant vs Beneficiary) or base benchmark (SOFR/LIBOR).',
+      detectedText: 'Drafts at: 120 DAYS FROM THE DATE OF ACCEPTANCE'
+    });
+  }
+
+  // ==========================================
   // RULE 8: Beneficiary Name Check (Field 59)
   // ==========================================
   if (settings?.companyName && detectedBeneficiary) {
