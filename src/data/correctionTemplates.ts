@@ -151,11 +151,30 @@ export const CORRECTION_TEMPLATES: CorrectionTemplate[] = [
     icon: 'Receipt',
     relevantFields: ['discrepancyChargeInLc', 'paymentChargeInLc', 'acceptableDiscrepancyCharge', 'acceptablePaymentCharge'],
     emailTemplate: (details) => {
-      const discInLc = details.discrepancyChargeInLc?.trim() || '75.00';
-      const payInLc = details.paymentChargeInLc?.trim() || '50.00';
+      const discInLc = details.discrepancyChargeInLc?.trim();
+      const payInLc = details.paymentChargeInLc?.trim();
       const accDisc = details.acceptableDiscrepancyCharge?.trim() || '25.00';
       const accPay = details.acceptablePaymentCharge?.trim() || '25.00';
-      return `We request that you revise the discrepancy and payment charge clauses. Your discrepancy charge of USD ${discInLc} and Payment charge of USD ${payInLc} are higher than what we can accept. Our acceptable charges are USD ${accDisc} for discrepancies and USD ${accPay} for payment.`;
+
+      // Case 1: Open-ended / Uncapped charges in Field 71D (no specific amount mentioned in LC)
+      if (discInLc === 'Unspecified' || payInLc === 'Unspecified') {
+        return `Please specify and cap the discrepancy and payment charges in Field 71D. Currently, these charges are placed on beneficiary account without any defined limits. The acceptable limits must not exceed USD ${accDisc} for discrepancy handling and USD ${accPay} for payment processing.`;
+      }
+
+      // Case 2: Specific amounts in LC
+      if (discInLc && payInLc) {
+        return `We request that you revise the discrepancy and payment charge clauses. Your discrepancy charge of USD ${discInLc} and Payment charge of USD ${payInLc} are higher than what we can accept. Our acceptable charges are USD ${accDisc} for discrepancies and USD ${accPay} for payment.`;
+      }
+
+      if (discInLc) {
+        return `We request that you revise the discrepancy charge clause. Your discrepancy charge of USD ${discInLc} is higher than what we can accept. Our acceptable charge is USD ${accDisc} for discrepancies.`;
+      }
+
+      if (payInLc) {
+        return `We request that you revise the payment charge clause. Your payment charge of USD ${payInLc} is higher than what we can accept. Our acceptable charge is USD ${accPay} for payment processing.`;
+      }
+
+      return `Please clearly cap the discrepancy and payment charges in the LC to not exceed USD ${accDisc} for discrepancies and USD ${accPay} for payment charges.`;
     },
     messageTemplate: (details) => {
       const accDisc = details.acceptableDiscrepancyCharge?.trim() || '25.00';
