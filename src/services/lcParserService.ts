@@ -156,27 +156,23 @@ export function auditLcText(text: string, settings?: UserSettings): LcAuditResul
   // RULE 2: Discrepancy & Payment Charges Revision
   // ==========================================
   // LC-তে ঠিক যা লেখা আছে হুবহু রিড করবে:
-  // ১) যদি কোনো স্ল্যাব বা ব্র্যাকেট শর্ত থাকে (e.g. "USD 30.00 (LESS THAN... 15,000) AND USD 50.00 (DOCUMENT VALUE 15,000 AND ABOVE)")
-  //    তাহলে এলসি টেক্সট অনুযায়ী সর্বোচ্চ/প্রধান প্রযোজ্য ফি (যেমন USD 50.00) রিড করবে।
-  // ২) সাধারণ ক্লজে (e.g. "DISCREPANCY CHARGES USD 100.00" বা "USD 50.00") থাকলে সরাসরি সেই অ্যামাউন্ট রিড করবে।
+  // Discrepancy ক্লজের আশপাশে উল্লেখিত সমস্ত ফি (যেমন Bank Asia-তে USD 30.00 এবং USD 50.00) রিড করে
+  // সর্বোচ্চ প্রযোজ্য চার্জটি তুলে নেবে (e.g. USD 50.00)।
   let discAmt = 0;
   let discStr = '';
 
-  // Check if multiple amounts mentioned in discrepancy clause (e.g. USD 30.00 and USD 50.00)
-  const discMultiMatch = normalizedText.match(/DISCREPA[A-Z]*\s*(?:FEE|CHARGE|CHARGES)?[\s\S]{0,160}?USD\s*(\d+(?:\.\d{2})?)[\s\S]{0,80}?USD\s*(\d+(?:\.\d{2})?)/i);
-  if (discMultiMatch) {
-    const val1 = parseFloat(discMultiMatch[1]);
-    const val2 = parseFloat(discMultiMatch[2]);
-    // Pick the maximum discrepancy fee mentioned in the clause (e.g. 50.00)
-    const maxVal = Math.max(val1, val2);
-    discAmt = maxVal;
-    discStr = maxVal.toFixed(2);
-  } else {
-    // Single discrepancy fee mentioned in LC
-    const discFeeMatch = normalizedText.match(/(?:DISCREPA[A-Z]*\s*(?:FEE|CHARGE|CHARGES)?\s*(?:OF|IS|:)?\s*(?:USD|EUR|GBP)?\s*(\d+(?:\.\d{2})?)|(?:USD|EUR|GBP)\s*(\d+(?:\.\d{2})?)\s*(?:PER|FOR EACH)?\s*DISCREPA[A-Z]*)/i);
-    if (discFeeMatch) {
-      discStr = discFeeMatch[1] || discFeeMatch[2];
-      discAmt = parseFloat(discStr);
+  const discIndex = normalizedText.search(/DISCREPA/i);
+  if (discIndex !== -1) {
+    const clauseSnippet = normalizedText.substring(discIndex, discIndex + 300);
+    // Find all currency fee numbers like USD 30.00 or USD 50.00 (excluding threshold figures like 15,000)
+    const feeMatches = [...clauseSnippet.matchAll(/(?:USD|EUR|GBP)?\s*(\d{2,3}(?:\.\d{2})?)\b(?!\s*,\s*000|\s*000)/gi)];
+    const candidateFees = feeMatches
+      .map(m => parseFloat(m[1]))
+      .filter(f => f >= 20 && f <= 350); // Valid commercial discrepancy fee range (20 to 350 USD)
+
+    if (candidateFees.length > 0) {
+      discAmt = Math.max(...candidateFees);
+      discStr = discAmt.toFixed(2);
     }
   }
 
