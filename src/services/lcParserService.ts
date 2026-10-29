@@ -194,8 +194,17 @@ export function auditLcText(text: string, settings?: UserSettings): LcAuditResul
       }
     }
 
-    // Flag if discrepancy charge > 25.00
-    if (discAmt > 25) {
+    // Check if discrepancy fee is explicitly on applicant's / buyer's account:
+    // e.g. "DISCREPANCY CHARGES USD 100.00 WILL BE DEDUCTED FROM APPLICANT'S ACCOUNT"
+    const isDiscOnApplicant =
+      clauseSnippet.includes("APPLICANT'S ACCOUNT") ||
+      clauseSnippet.includes("FOR APPLICANT ACCOUNT") ||
+      clauseSnippet.includes("FOR ACCOUNT OF APPLICANT") ||
+      clauseSnippet.includes("FROM APPLICANT") ||
+      clauseSnippet.includes("BUYER'S ACCOUNT");
+
+    // Flag ONLY if discrepancy charge > 25.00 AND NOT paid by applicant
+    if (discAmt > 25 && !isDiscOnApplicant) {
       issues.push({
         id: 'issue_excessive_discrepancy_fee',
         correctionId: 'discrepancy_charges',
@@ -530,16 +539,23 @@ export function auditLcText(text: string, settings?: UserSettings): LcAuditResul
   }
 
   // ==========================================
-  // RULE 7E: Missing Overdue Interest Clause & Usance Interest (SOFR/LIBOR) Alert
+  // RULE 7E: Missing Overdue Interest Clause Check (ONLY for Usance / Deferred LCs)
   // ==========================================
-  // For Usance/Deferred LCs (e.g. 120 Days from acceptance, 120 Days Sight, etc.):
-  // 1) If NO overdue clause exists -> Request Overdue Clause.
-  // 2) If interest clause exists with SOFR/LIBOR rate -> Show Information / Review Alert (per user requirement).
-  const isUsanceDeferred = /\b(?:30|60|90|120|150|180)\s*DAYS\b/i.test(normalizedText) ||
-                           upper.includes('FROM THE DATE OF ACCEPTANCE') ||
-                           upper.includes('AFTER ACCEPTANCE') ||
-                           upper.includes('FROM THE DATE OF DELIVERY') ||
-                           upper.includes('SIGHT FROM THE DATE');
+  // AT SIGHT LCs: Payment is due immediately upon compliant documents. Overdue clause is NOT required.
+  // Usance / Deferred LCs: Payment is deferred (30/60/90/120/180 days). Overdue interest clause IS required.
+  const f42cMatch = normalizedText.match(/(?:F42C:[^\n]*Drafts[^\n]*|:42C:)[^\n:]*[:#]?\s*([^\n]+(?:\n[^\n]+)?)/i);
+  const tenorFieldText = f42cMatch ? f42cMatch[1].toUpperCase() : '';
+
+  const isAtSight = tenorFieldText.includes('AT SIGHT') ||
+                    (upper.includes('AT SIGHT') && !/\b(?:30|60|90|120|150|180)\s*DAYS\b/i.test(tenorFieldText));
+
+  const isUsanceDeferred = !isAtSight && (
+    /\b(?:30|60|90|120|150|180)\s*DAYS\b/i.test(normalizedText) ||
+    upper.includes('AFTER ACCEPTANCE') ||
+    upper.includes('FROM THE DATE OF ACCEPTANCE') ||
+    upper.includes('FROM THE DATE OF DELIVERY') ||
+    upper.includes('SIGHT FROM THE DATE')
+  );
 
   // Check if there is an actual Overdue clause in LC conditions (F47A or text)
   // Ignore footer metadata strings like "Delivery overdue warning request"
