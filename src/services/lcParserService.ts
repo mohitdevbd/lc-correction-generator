@@ -196,12 +196,17 @@ export function auditLcText(text: string, settings?: UserSettings): LcAuditResul
 
     // Check if discrepancy fee is explicitly on applicant's / buyer's account:
     // e.g. "DISCREPANCY CHARGES USD 100.00 WILL BE DEDUCTED FROM APPLICANT'S ACCOUNT"
+    const upperSnippet = clauseSnippet.toUpperCase().replace(/\s+/g, ' ');
     const isDiscOnApplicant =
-      clauseSnippet.includes("APPLICANT'S ACCOUNT") ||
-      clauseSnippet.includes("FOR APPLICANT ACCOUNT") ||
-      clauseSnippet.includes("FOR ACCOUNT OF APPLICANT") ||
-      clauseSnippet.includes("FROM APPLICANT") ||
-      clauseSnippet.includes("BUYER'S ACCOUNT");
+      upperSnippet.includes("APPLICANT'S ACCOUNT") ||
+      upperSnippet.includes("APPLICANTS ACCOUNT") ||
+      upperSnippet.includes("APPLICANT ACCOUNT") ||
+      upperSnippet.includes("FOR APPLICANT") ||
+      upperSnippet.includes("FROM APPLICANT") ||
+      upperSnippet.includes("BORNE BY APPLICANT") ||
+      upperSnippet.includes("BUYER'S ACCOUNT") ||
+      upperSnippet.includes("BUYERS ACCOUNT") ||
+      upperSnippet.includes("BUYER ACCOUNT");
 
     // Flag ONLY if discrepancy charge > 25.00 AND NOT paid by applicant
     if (discAmt > 25 && !isDiscOnApplicant) {
@@ -490,23 +495,34 @@ export function auditLcText(text: string, settings?: UserSettings): LcAuditResul
   // ==========================================
   // RULE 7C: Draft Tenor & Payment Clause Check (Field 42C / F42C)
   // ==========================================
-  const tenorMatch = normalizedText.match(/(?:F42C:[^\n]*Drafts[^\n]*|:42C:)[^\n:]*[:#]?\s*([^\n]+(?:\n[^\n]+)?)/i);
+  // Standard Usance Tenors in textile/commercial LCs:
+  // - "120 DAYS FROM THE DATE OF ACCEPTANCE"
+  // - "90 DAYS FROM THE DATE OF ACCEPTANCE"
+  // - "120 DAYS" / "90 DAYS" / "60 DAYS" / "AT SIGHT"
+  // These are standard acceptable terms and should NOT be flagged as errors or issues.
+  // We ONLY flag if an abnormal/risky calculation trigger is used, such as "FROM THE DATE OF DELIVERY"
+  // or "FROM THE DATE OF GOODS ARRIVAL" (which violates UCP 600 negotiation).
+  const tenorMatch = normalizedText.match(/(?:F42C:\s*Drafts\s*(?:at)?\s*(?:\.{1,3}|…)?|:42C:)\s*[:#]?\s*([^\n]+)/i);
   if (tenorMatch) {
     const tenorText = tenorMatch[1].replace(/\s+/g, ' ').trim();
-    // If deferred tenor (like 120 days from acceptance)
-    if (/\b(?:60|90|120|150|180)\s*DAYS\b/i.test(tenorText)) {
+    const upperTenor = tenorText.toUpperCase();
+
+    // Flag abnormal tenor condition: e.g. "FROM THE DATE OF DELIVERY"
+    if (upperTenor.includes('DATE OF DELIVERY') || upperTenor.includes('DATE OF GOODS RECEIPT') || upperTenor.includes('ARRIVAL')) {
       issues.push({
-        id: 'issue_draft_tenor',
+        id: 'issue_draft_tenor_delivery',
         correctionId: 'draft_tenor_correction',
-        title: `Deferred Payment Tenor Detected (${tenorText})`,
-        severity: 'info',
-        reason: `LC specifies deferred payment tenor: "${tenorText}". Verify if this matches your agreed Proforma Invoice (PI) terms (e.g. At Sight vs 120 Days).`,
+        title: 'Risky Draft Tenor (Counted From Date of Delivery)',
+        severity: 'critical',
+        reason: `LC draft tenor states: "${tenorText}". Tenor counted from delivery date violates UCP 600 standards. It must be amended to standard "from the date of acceptance" or "from bill of exchange date".`,
         detectedText: `Drafts at: ${tenorText}`,
         suggestedDetails: {
-          currentTenor: tenorText
+          currentTenor: tenorText,
+          requiredTenor: '120 DAYS FROM THE DATE OF ACCEPTANCE'
         }
       });
     }
+    // Note: Standard "120 DAYS FROM THE DATE OF ACCEPTANCE", "90 DAYS...", "AT SIGHT" etc. are ACCEPTABLE and NOT flagged.
   }
 
   // ==========================================
@@ -543,7 +559,7 @@ export function auditLcText(text: string, settings?: UserSettings): LcAuditResul
   // ==========================================
   // AT SIGHT LCs: Payment is due immediately upon compliant documents. Overdue clause is NOT required.
   // Usance / Deferred LCs: Payment is deferred (30/60/90/120/180 days). Overdue interest clause IS required.
-  const f42cMatch = normalizedText.match(/(?:F42C:[^\n]*Drafts[^\n]*|:42C:)[^\n:]*[:#]?\s*([^\n]+(?:\n[^\n]+)?)/i);
+  const f42cMatch = normalizedText.match(/(?:F42C:\s*Drafts\s*(?:at)?\s*(?:\.{1,3}|…)?|:42C:)\s*[:#]?\s*([^\n]+)/i);
   const tenorFieldText = f42cMatch ? f42cMatch[1].toUpperCase() : '';
 
   const isAtSight = tenorFieldText.includes('AT SIGHT') ||
