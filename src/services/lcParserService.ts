@@ -153,62 +153,179 @@ export function auditLcText(text: string, settings?: UserSettings): LcAuditResul
   }
 
   // ==========================================
-  // RULE 2: Discrepancy & Payment Charges Revision
+  // RULE 2: Discrepancy Fee & Payment/Settlement/Reimbursement/RTGS Charges Audit
   // ==========================================
-  // LC-তে ঠিক যা লেখা আছে হুবহু রিড করবে:
-  // Discrepancy ক্লজের আশপাশে উল্লেখিত সমস্ত ফি (যেমন Bank Asia-তে USD 30.00 এবং USD 50.00) রিড করে
-  // সর্বোচ্চ প্রযোজ্য চার্জটি তুলে নেবে (e.g. USD 50.00)।
+  // 1. DISCREPANCY FEE AUDIT:
+  //    - Maximum acceptable limit is USD 25.00.
+  //    - If slab exists (e.g. Bank Asia: <15k vs >=15k), checks applicable fee based on LC amount.
+  //    - If fee > 25, flag it.
+  //    - If no discrepancy fee clause is found in LC, flag to request a discrepancy cap clause.
+  const numericLcAmount = detectedAmount ? parseFloat(detectedAmount.replace(/,/g, '')) : 0;
   let discAmt = 0;
   let discStr = '';
 
   const discIndex = normalizedText.search(/DISCREPA/i);
   if (discIndex !== -1) {
     const clauseSnippet = normalizedText.substring(discIndex, discIndex + 300);
-    // Find all currency fee numbers like USD 30.00 or USD 50.00 (excluding threshold figures like 15,000)
-    const feeMatches = [...clauseSnippet.matchAll(/(?:USD|EUR|GBP)?\s*(\d{2,3}(?:\.\d{2})?)\b(?!\s*,\s*000|\s*000)/gi)];
-    const candidateFees = feeMatches
-      .map(m => parseFloat(m[1]))
-      .filter(f => f >= 20 && f <= 350); // Valid commercial discrepancy fee range (20 to 350 USD)
 
-    if (candidateFees.length > 0) {
-      discAmt = Math.max(...candidateFees);
-      discStr = discAmt.toFixed(2);
+    // Check for tiered discrepancy clause with slab threshold (e.g. 15,000 / 20,000)
+    const tieredMatch = clauseSnippet.match(/USD\s*(\d+(?:\.\d{2})?)[^\n.]*?LESS\s+THAN[^\n.]*?(\d{1,3}(?:,\d{3})*|\d+)[^\n.]*?AND\s+(?:USD)?\s*(\d+(?:\.\d{2})?)/i);
+    if (tieredMatch) {
+      const lowerFee = parseFloat(tieredMatch[1]);
+      const threshold = parseFloat(tieredMatch[2].replace(/,/g, ''));
+      const higherFee = parseFloat(tieredMatch[3]);
+      if (numericLcAmount >= threshold && numericLcAmount > 0) {
+        discAmt = higherFee;
+        discStr = higherFee.toFixed(2);
+      } else {
+        discAmt = lowerFee;
+        discStr = lowerFee.toFixed(2);
+      }
+    } else {
+      // Find candidate discrepancy fee numbers like USD 30.00, USD 50.00, USD 100.00 (excluding threshold figures)
+      const feeMatches = [...clauseSnippet.matchAll(/(?:USD|EUR|GBP)?\s*(\d{2,3}(?:\.\d{2})?)\b(?!\s*,\s*000|\s*000)/gi)];
+      const candidateFees = feeMatches
+        .map(m => parseFloat(m[1]))
+        .filter(f => f >= 10 && f <= 350);
+
+      if (candidateFees.length > 0) {
+        discAmt = Math.max(...candidateFees);
+        discStr = discAmt.toFixed(2);
+      }
     }
-  }
 
-  // Also check for payment / reimbursement / settlement charges anywhere in LC (including Field 78 / F78)
-  // e.g. "WE WILL DEDUCT PAYMENT CHARGE USD 30.00 FROM PROCEEDS" or "PAYMENT CHARGE USD 50.00"
-  const payFeeMatch = normalizedText.match(/(?:(?:DEDUCT\s+)?PAYMENT\s+CHARGE[S]?\s+(?:OF\s+)?(?:USD|EUR|GBP)?\s*(\d+(?:\.\d{2})?)|(?:PAYMENT|REIMBURSEMENT|SETTLEMENT)\s*(?:CHARGE|COMMISSION|FEE)\s*(?:OF|IS|:)?\s*(?:USD|EUR|GBP)?\s*(\d+(?:\.\d{2})?))/i);
-  let payStr = '';
-  let payAmt = 0;
-  if (payFeeMatch) {
-    payStr = payFeeMatch[1] || payFeeMatch[2];
-    payAmt = parseFloat(payStr || '0');
-  }
-
-  // Flag if discrepancy charge > 30 or payment charge >= 25 (or deduction mentioned in F78)
-  const hasF78PaymentDeduction = /DEDUCT\s+PAYMENT\s+CHARGE/i.test(normalizedText) ||
-                                /PAYMENT\s+CHARGE[\s\S]{0,30}FROM\s+PROCEEDS/i.test(normalizedText);
-
-  if (discAmt > 30 || payAmt >= 25 || hasF78PaymentDeduction) {
-    const snippet = extractSnippet(normalizedText, /(?:DEDUCT\s+PAYMENT\s+CHARGE[^\n.]*|PAYMENT\s+CHARGE\s+USD\s*\d+[^\n.]*|DISCREPANCY\s+(?:FEE|CHARGE)[^\n.]*)/i);
+    // Flag if discrepancy charge > 25.00
+    if (discAmt > 25) {
+      issues.push({
+        id: 'issue_excessive_discrepancy_fee',
+        correctionId: 'discrepancy_charges',
+        title: `Excessive Discrepancy Fee (USD ${discStr})`,
+        severity: 'warning',
+        reason: `The discrepancy fee in the LC is USD ${discStr}, which exceeds the standard acceptable limit of USD 25.00.`,
+        detectedText: extractSnippet(normalizedText, /DISCREPANCY\s+(?:FEE|CHARGE)[^\n.]{0,100}/i) || `Discrepancy fee: USD ${discStr}`,
+        suggestedDetails: {
+          discrepancyChargeInLc: discStr,
+          acceptableDiscrepancyCharge: '25.00',
+          maxChargeAmount: '25.00'
+        }
+      });
+    }
+  } else {
+    // No discrepancy fee clause found at all in LC -> Request standard discrepancy clause capped at USD 25.00
     issues.push({
-      id: 'issue_discrepancy_revision',
-      correctionId: 'discrepancy_payment_charges_revision',
-      title: 'Payment Charge Deduction / Excessive Charges',
-      severity: 'warning',
-      reason: payStr
-        ? `The LC states a payment charge of USD ${payStr} will be deducted from bill proceeds (Field 78/47A). Payment processing charges should either be waived, capped at acceptable limit (USD 25.00), or borne by the applicant.`
-        : `Discrepancy / payment charges in LC are above standard acceptable rates.`,
-      detectedText: snippet || (payStr ? `Deduct payment charge USD ${payStr} from proceeds` : undefined),
+      id: 'issue_missing_discrepancy_clause',
+      correctionId: 'discrepancy_charges',
+      title: 'Missing Discrepancy Fee Clause (Uncapped Risk)',
+      severity: 'info',
+      reason: 'No discrepancy handling fee clause is defined in the LC. It is recommended to specify that discrepancy charges, if any, shall not exceed USD 25.00.',
       suggestedDetails: {
-        discrepancyChargeInLc: discStr || '50.00',
-        paymentChargeInLc: payStr || '30.00',
-        acceptableDiscrepancyCharge: '25.00',
-        acceptablePaymentCharge: '25.00'
+        maxChargeAmount: '25.00',
+        acceptableDiscrepancyCharge: '25.00'
       }
     });
   }
+
+  // 2. PAYMENT / REIMBURSEMENT / SETTLEMENT / FUND TRANSFER / RTGS CHARGES AUDIT:
+  //    - These fees can be in Field 47A, 71D, 78, etc.
+  //    - Total of these charges cannot exceed USD 25.00.
+  //    - If fee > USD 25.00 but paid by APPLICANT/BUYER, do NOT flag.
+  //    - If slab exists (e.g. Eastern Bank: <=20k is $25, >20k is $50), evaluate based on LC amount.
+  //    - If NONE of these charges exist in LC, flag to request clear limit so bank cannot arbitrarily deduct.
+  const paymentFeeRegex = /(?:PAYMENT|REIMBURSEMENT|SETTLEMENT|FUND\s*TRANSFER|RTGS)\s*(?:CHARGE|COMMISSION|FEE)[S]?/i;
+  const hasAnyPaymentFeeMention = paymentFeeRegex.test(normalizedText) ||
+                                  /DEDUCT\s+(?:PAYMENT|SETTLEMENT|REIMBURSEMENT)\s+CHARGE/i.test(normalizedText);
+
+  if (hasAnyPaymentFeeMention) {
+    // Extract candidate snippets around payment/settlement charges
+    const paymentSnippets: string[] = [];
+    const paymentRegexGlobal = /(?:(?:WE\s+WILL\s+DEDUCT\s+)?(?:PAYMENT|REIMBURSEMENT|SETTLEMENT|FUND\s*TRANSFER|RTGS)\s*(?:PROCESSING\s*)?(?:CHARGE|COMMISSION|FEE)[S]?[^\n.]*)/gi;
+    let pMatch;
+    while ((pMatch = paymentRegexGlobal.exec(normalizedText)) !== null) {
+      paymentSnippets.push(pMatch[0].trim());
+    }
+
+    let totalPaymentFeeBeneficiary = 0;
+    const detectedPaymentFees: Array<{ type: string; amount: number; text: string }> = [];
+    let isBorneByApplicant = false;
+
+    for (const snippet of paymentSnippets) {
+      const upperSnippet = snippet.toUpperCase();
+      // Check if this specific charge is explicitly for applicant's account
+      if (
+        upperSnippet.includes("APPLICANT'S ACCOUNT") ||
+        upperSnippet.includes("FOR APPLICANT ACCOUNT") ||
+        upperSnippet.includes("FOR ACCOUNT OF APPLICANT") ||
+        upperSnippet.includes("BORNE BY APPLICANT") ||
+        upperSnippet.includes("BUYER'S ACCOUNT")
+      ) {
+        isBorneByApplicant = true;
+        continue;
+      }
+
+      // Check tiered slab in payment snippet (e.g. EBL: USD 25 for <= 20,000 and USD 50 for > 20,000)
+      const tieredPaymentMatch = snippet.match(/USD\s*(\d+(?:\.\d{2})?)[^\n.]*?UP\s+TO[^\n.]*?(\d{1,3}(?:,\d{3})*|\d+)[^\n.]*?AND\s+(?:USD)?\s*(\d+(?:\.\d{2})?)/i);
+      if (tieredPaymentMatch) {
+        const lowerFee = parseFloat(tieredPaymentMatch[1]);
+        const threshold = parseFloat(tieredPaymentMatch[2].replace(/,/g, ''));
+        const higherFee = parseFloat(tieredPaymentMatch[3]);
+        const applicableFee = (numericLcAmount > threshold && numericLcAmount > 0) ? higherFee : lowerFee;
+        totalPaymentFeeBeneficiary += applicableFee;
+        detectedPaymentFees.push({ type: 'Tiered Payment Charge', amount: applicableFee, text: snippet });
+      } else {
+        // Individual fee amount
+        const amountMatch = snippet.match(/(?:USD|EUR|GBP)?\s*(\d+(?:\.\d{2})?)/i);
+        if (amountMatch) {
+          const fee = parseFloat(amountMatch[1]);
+          if (fee > 0 && fee <= 300) {
+            totalPaymentFeeBeneficiary += fee;
+            detectedPaymentFees.push({ type: 'Charge', amount: fee, text: snippet });
+          }
+        }
+      }
+    }
+
+    // Also check Field 78 direct payment deduction statement e.g. Bank Asia: USD 30
+    const f78DeductMatch = normalizedText.match(/DEDUCT\s+PAYMENT\s+CHARGE\s+(?:USD)?\s*(\d+(?:\.\d{2})?)/i);
+    if (f78DeductMatch && !detectedPaymentFees.some(f => f.amount === parseFloat(f78DeductMatch[1]))) {
+      const f78Amt = parseFloat(f78DeductMatch[1]);
+      totalPaymentFeeBeneficiary += f78Amt;
+      detectedPaymentFees.push({ type: 'Field 78 Payment Deduction', amount: f78Amt, text: f78DeductMatch[0] });
+    }
+
+    // If total fees on beneficiary exceed USD 25.00 (and not borne by applicant)
+    if (totalPaymentFeeBeneficiary > 25 && !isBorneByApplicant) {
+      const feesBreakdown = detectedPaymentFees.map(f => `USD ${f.amount.toFixed(2)}`).join(' + ');
+      issues.push({
+        id: 'issue_payment_charges_limit_exceeded',
+        correctionId: 'payment_processing_charges',
+        title: `Payment / Settlement Charges Exceed USD 25.00 (Total: USD ${totalPaymentFeeBeneficiary.toFixed(2)})`,
+        severity: 'warning',
+        reason: `Payment/settlement/reimbursement charges in the LC total USD ${totalPaymentFeeBeneficiary.toFixed(2)} (${feesBreakdown}), which exceeds the allowable limit of USD 25.00. These charges must be capped at USD 25.00 in total or borne by the applicant.`,
+        detectedText: detectedPaymentFees[0]?.text || `Total charges: USD ${totalPaymentFeeBeneficiary.toFixed(2)}`,
+        suggestedDetails: {
+          paymentChargeInLc: totalPaymentFeeBeneficiary.toFixed(2),
+          acceptablePaymentCharge: '25.00',
+          maxChargeAmount: '25.00'
+        }
+      });
+    }
+  } else {
+    // If no Payment / Fund Transfer / Settlement charge clause exists at all, request a ceiling clause
+    issues.push({
+      id: 'issue_missing_payment_charge_clause',
+      correctionId: 'total_bank_charges_limit',
+      title: 'Missing Payment / Bank Charge Ceiling Clause',
+      severity: 'info',
+      reason: 'The LC does not define specific caps for payment, settlement, or fund transfer charges. To prevent unexpected banking deductions at maturity, specify an overall charge ceiling of USD 25.00.',
+      suggestedDetails: {
+        maxChargeAmount: '25.00'
+      }
+    });
+  }
+
+  // ==========================================
+  // RULE 3: Acceptance After Physical Receipt – Delete
+  // ==========================================
 
   // ==========================================
   // RULE 3: Acceptance After Physical Receipt – Delete
@@ -392,7 +509,7 @@ export function auditLcText(text: string, settings?: UserSettings): LcAuditResul
   if (
     chargesBlock &&
     (chargesBlock.includes('DISCREPANCY') || chargesBlock.includes('PAYMENT CHARGE')) &&
-    !discStr && !payStr
+    !discStr && !hasAnyPaymentFeeMention
   ) {
     const unspecSnippet = extractSnippet(normalizedText, /(?:INCLUDING|AND)[\s\S]{0,80}(?:PAYMENT|DISCREPANCY)[\s\S]{0,80}BENEFICIARY/i) ||
                           extractSnippet(normalizedText, /:71D:[\s\S]{0,120}/i);
@@ -413,10 +530,11 @@ export function auditLcText(text: string, settings?: UserSettings): LcAuditResul
   }
 
   // ==========================================
-  // RULE 7E: Missing Overdue Interest Clause Check
+  // RULE 7E: Missing Overdue Interest Clause & Usance Interest (SOFR/LIBOR) Alert
   // ==========================================
-  // For Usance/Deferred LCs (e.g. 120 Days from acceptance, 120 Days Sight, etc.), an overdue interest clause
-  // (e.g., "Overdue interest will be paid at LIBOR/SOFR rate from maturity") should be included as per PI terms.
+  // For Usance/Deferred LCs (e.g. 120 Days from acceptance, 120 Days Sight, etc.):
+  // 1) If NO overdue clause exists -> Request Overdue Clause.
+  // 2) If interest clause exists with SOFR/LIBOR rate -> Show Information / Review Alert (per user requirement).
   const isUsanceDeferred = /\b(?:30|60|90|120|150|180)\s*DAYS\b/i.test(normalizedText) ||
                            upper.includes('FROM THE DATE OF ACCEPTANCE') ||
                            upper.includes('AFTER ACCEPTANCE') ||
@@ -433,6 +551,12 @@ export function auditLcText(text: string, settings?: UserSettings): LcAuditResul
                            upperBody.includes('OVERDUE CLAUSE') ||
                            (upperBody.includes('OVERDUE') && (upperBody.includes('RATE') || upperBody.includes('PAY') || upperBody.includes('MATURITY')));
 
+  // Check for benchmark interest terms like SOFR / LIBOR
+  const hasBenchmarkInterest = upperBody.includes('SOFR') ||
+                               upperBody.includes('LIBOR') ||
+                               upperBody.includes('ATLIBOR') ||
+                               upperBody.includes('AT LIBOR');
+
   if (isUsanceDeferred && !hasOverdueClause) {
     issues.push({
       id: 'issue_missing_overdue_clause',
@@ -444,23 +568,42 @@ export function auditLcText(text: string, settings?: UserSettings): LcAuditResul
     });
   }
 
-  // ==========================================
-  // RULE 7F: Missing Payment Settlement / RTGS Term Clarification
-  // ==========================================
-  // If payment clause does not specify interest rate/payment conditions clearly
-  const hasPaymentInterestClause = upper.includes('INTEREST WILL BE PAID') ||
-                                   upper.includes('INTEREST FOR USANCE') ||
-                                   upper.includes('SOFR') ||
-                                   upper.includes('LIBOR');
-
-  if (isUsanceDeferred && !hasPaymentInterestClause) {
+  // Information / Review Alert for SOFR/LIBOR benchmark interest clause
+  if (isUsanceDeferred && hasBenchmarkInterest) {
+    const interestSnippet = extractSnippet(normalizedText, /(?:INTEREST\s+WILL\s+BE\s+PAID[^\n.]*|AT\s*(?:LIBOR|SOFR)[^\n.]*)/i) ||
+                            extractSnippet(normalizedText, /(?:LIBOR|SOFR)[^\n.]{0,80}/i);
     issues.push({
-      id: 'issue_missing_payment_clause',
+      id: 'issue_benchmark_interest_review',
       correctionId: 'payment_clause',
-      title: 'Missing Usance Interest / Payment Terms Clause',
+      title: 'Interest Rate Benchmark Alert (SOFR / LIBOR Clause Detected)',
       severity: 'info',
-      reason: 'The LC specifies a 120-day tenor but lacks specific payment terms regarding who pays the usance interest (Applicant vs Beneficiary) or base benchmark (SOFR/LIBOR).',
-      detectedText: 'Drafts at: 120 DAYS FROM THE DATE OF ACCEPTANCE'
+      reason: 'The LC specifies interest payment tied to SOFR / LIBOR. Please verify with your agreed Proforma Invoice (PI) whether the interest rate, spread, and payer (Applicant vs Beneficiary) match your agreed commercial terms.',
+      detectedText: interestSnippet || 'Interest benchmark (SOFR/LIBOR) detected in LC.'
+    });
+  }
+
+  // ==========================================
+  // RULE 7G: Partial Payment / Partial Drawing Not Allowed Check
+  // ==========================================
+  const isPartialPaymentRestricted = /PARTIAL\s+PAYMENT[S]?\s+(?:IS\s+|ARE\s+)?NOT\s+ALLOWED/i.test(normalizedText) ||
+                                    /PARTIAL\s+DRAWING[S]?\s+(?:IS\s+|ARE\s+)?NOT\s+ALLOWED/i.test(normalizedText) ||
+                                    /PARTIAL\s+DRAWINGS?\s+PROHIBITED/i.test(normalizedText) ||
+                                    /NO\s+PARTIAL\s+DRAWING/i.test(normalizedText) ||
+                                    /DOCUMENTS\s+TO\s+BE\s+DESPATCHED\s+IN\s+ONE\s+LOT/i.test(normalizedText);
+
+  if (isPartialPaymentRestricted) {
+    const partialSnippet = extractSnippet(normalizedText, /PARTIAL\s+(?:PAYMENT|DRAWING)[S]?[^\n.]{0,80}/i) ||
+                           extractSnippet(normalizedText, /DOCUMENTS\s+TO\s+BE\s+DESPATCHED\s+IN\s+ONE\s+LOT[^\n.]{0,80}/i);
+    issues.push({
+      id: 'issue_partial_payment_not_allowed',
+      correctionId: 'partial_payment_not_allowed',
+      title: 'Partial Payment / Drawing Not Allowed (Restricted)',
+      severity: 'warning',
+      reason: 'The LC restricts partial payments or partial drawings (or mandates documents in one single lot). In commercial export shipments, partial drawings must be allowed against partial deliveries.',
+      detectedText: partialSnippet || 'Partial payment or partial drawing is restricted in the LC.',
+      suggestedDetails: {
+        additionalNote: 'Allow partial payments / partial drawings against each compliant document presentation.'
+      }
     });
   }
 

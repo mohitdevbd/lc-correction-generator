@@ -596,6 +596,26 @@ export const CORRECTION_TEMPLATES: CorrectionTemplate[] = [
     }
   },
   {
+    id: 'partial_payment_not_allowed',
+    title: 'Partial Payment / Drawing Not Allowed',
+    category: 'clauses',
+    shortDescription: 'Allow partial payments/drawings as per commercial shipment needs',
+    icon: 'Split',
+    relevantFields: ['additionalNote'],
+    emailTemplate: (details) => {
+      if (details.additionalNote?.trim()) {
+        return `Please amend the LC to allow partial payment/drawings: "${details.additionalNote.trim()}". Currently, partial payment or drawing is restricted in the LC.`;
+      }
+      return 'Please amend the LC to clearly allow partial payments / partial drawings against partial shipments/documents. Partial drawings must not be restricted.';
+    },
+    messageTemplate: (details) => {
+      if (details.additionalNote?.trim()) {
+        return `Allow partial payment/drawing: ${details.additionalNote.trim()}.`;
+      }
+      return 'Amend LC to allow partial payment / partial drawing.';
+    }
+  },
+  {
     id: 'other_correction',
     title: 'Other Correction',
     category: 'clauses',
