@@ -80,15 +80,26 @@ function parseTieredFee(clauseText: string, lcAmount: number): { lowerFee: numbe
     return { lowerFee, higherFee, threshold, applicableFee };
   }
 
-  // Pattern B (e.g. Bank Asia, EBL):
-  // "USD 30.00 (LESS THAN DOCUMENT VALUE USD15,000) AND USD 50.00(DOCUMENT VALUE USD15,000 AND ABOVE)"
-  // or "USD 25.00 UP TO 20,000 AND USD 50.00 FOR ABOVE 20,000"
-  const patternB = /(?:USD|EUR|GBP)?\s*(\d+(?:\.\d{2})?)[^.]*?(?:UP\s*TO|LESS\s+THAN)[^.]*?(?:USD|EUR|GBP)?\s*([\d,]+(?:\.\d{2})?)[^.]*?(?:AND|\/)\s*(?:USD|EUR|GBP)?\s*(\d+(?:\.\d{2})?)/i;
+  // Pattern B (e.g. Shahjalal: "USD 50.00 ... ABOVE USD 5000.00 OR USD 25.00 ... UPTO USD 5000.00"):
+  const patternB = /(?:USD|EUR|GBP)?\s*(\d+(?:\.\d{2})?)[^.]*?(?:ABOVE|EXCEEDING)[^.]*?(?:USD|EUR|GBP)?\s*([\d,]+(?:\.\d{2})?)[^.]*?(?:OR|AND|\/)[^.]*?(?:USD|EUR|GBP)?\s*(\d+(?:\.\d{2})?)[^.]*?(?:UP\s*TO|LESS\s+THAN)/i;
   const matchB = norm.match(patternB);
   if (matchB) {
-    const lowerFee = parseFloat(matchB[1]);
+    const higherFee = parseFloat(matchB[1]);
     const threshold = parseFloat(matchB[2].replace(/,/g, ''));
-    const higherFee = parseFloat(matchB[3]);
+    const lowerFee = parseFloat(matchB[3]);
+    const applicableFee = (lcAmount > threshold && lcAmount > 0) ? higherFee : lowerFee;
+    return { lowerFee, higherFee, threshold, applicableFee };
+  }
+
+  // Pattern C (e.g. Bank Asia, EBL):
+  // "USD 30.00 (LESS THAN DOCUMENT VALUE USD15,000) AND USD 50.00(DOCUMENT VALUE USD15,000 AND ABOVE)"
+  // or "USD 25.00 UP TO 20,000 AND USD 50.00 FOR ABOVE 20,000"
+  const patternC = /(?:USD|EUR|GBP)?\s*(\d+(?:\.\d{2})?)[^.]*?(?:UP\s*TO|LESS\s+THAN)[^.]*?(?:USD|EUR|GBP)?\s*([\d,]+(?:\.\d{2})?)[^.]*?(?:AND|\/)\s*(?:USD|EUR|GBP)?\s*(\d+(?:\.\d{2})?)/i;
+  const matchC = norm.match(patternC);
+  if (matchC) {
+    const lowerFee = parseFloat(matchC[1]);
+    const threshold = parseFloat(matchC[2].replace(/,/g, ''));
+    const higherFee = parseFloat(matchC[3]);
     const applicableFee = (lcAmount >= threshold && lcAmount > 0) ? higherFee : lowerFee;
     return { lowerFee, higherFee, threshold, applicableFee };
   }
@@ -265,25 +276,27 @@ export function auditLcText(text: string, settings?: UserSettings): LcAuditResul
 
   // 2. PAYMENT / REIMBURSEMENT / SETTLEMENT / FUND TRANSFER / RTGS CHARGES AUDIT:
   //    - These fees can be in Field 47A, 71D, 78, etc.
+  //    - e.g. "AN AMOUNT OF USD 50.00 AS DOCUMENT SETTLEMENT WILL BE DEDUCTED"
   //    - Total of these charges cannot exceed USD 25.00.
   //    - If fee > USD 25.00 but paid by APPLICANT/BUYER, do NOT flag.
-  //    - If slab exists (e.g. Eastern Bank: <=20k is $25, >20k is $50), evaluate based on LC amount.
+  //    - If slab exists, evaluate based on LC amount.
   //    - If NONE of these charges exist in LC, flag to request clear limit so bank cannot arbitrarily deduct.
-  const paymentFeeRegex = /(?:PAYMENT|REIMBURSEMENT|SETTLEMENT|FUND\s*TRANSFER|RTGS)\s*(?:CHARGE|COMMISSION|FEE)[S]?/i;
+  const paymentFeeRegex = /(?:PAYMENT|REIMBURSEMENT|SETTLEMENT|DOCUMENT\s*SETTLEMENT|FUND\s*TRANSFER|RTGS)/i;
   const hasAnyPaymentFeeMention = paymentFeeRegex.test(normalizedText) ||
                                   /DEDUCT\s+(?:PAYMENT|SETTLEMENT|REIMBURSEMENT)\s+CHARGE/i.test(normalizedText);
+
+  let totalPaymentFeeBeneficiary = 0;
+  const detectedPaymentFees: Array<{ type: string; amount: number; text: string }> = [];
 
   if (hasAnyPaymentFeeMention) {
     // Extract candidate snippets around payment/settlement charges (multi-line supported)
     const paymentSnippets: string[] = [];
-    const paymentRegexGlobal = /(?:(?:WE\s+(?:WILL|SHALL)\s+DEDUCT\s+)?(?:PAYMENT|REIMBURSEMENT|SETTLEMENT|FUND\s*TRANSFER|RTGS)\s*(?:PROCESSING\s*)?(?:CHARGE|COMMISSION|FEE)[S]?[\s\S]*?(?:\.(?!\d)\s*(?=[A-Z:\n])|(?=:[0-9]{2}[A-Z]?:|F[0-9]{2}[A-Z]?:)|\n\s*\.|$))/gi;
+    const paymentRegexGlobal = /(?:(?:(?:AN\s+AMOUNT\s+OF\s+)?(?:USD|EUR|GBP)?\s*[\d.]+\s+AS\s+(?:DOCUMENT\s+)?SETTLEMENT[\s\S]*?(?:\.(?!\d)\s*(?=[A-Z0-9:\n])|(?=:[0-9]{2}[A-Z]?:|F[0-9]{2}[A-Z]?:)|\n\s*\.|\n\s*[0-9]{2}\.|$))|(?:(?:WE\s+(?:WILL|SHALL)\s+DEDUCT\s+)?(?:PAYMENT|REIMBURSEMENT|SETTLEMENT|DOCUMENT\s*SETTLEMENT|FUND\s*TRANSFER|RTGS)\s*(?:PROCESSING\s*)?(?:CHARGE|COMMISSION|FEE|COST)?[S]?[\s\S]*?(?:\.(?!\d)\s*(?=[A-Z:\n])|(?=:[0-9]{2}[A-Z]?:|F[0-9]{2}[A-Z]?:)|\n\s*\.|\n\s*[0-9]{2}\.|$)))/gi;
     let pMatch;
     while ((pMatch = paymentRegexGlobal.exec(normalizedText)) !== null) {
       paymentSnippets.push(pMatch[0].trim());
     }
 
-    let totalPaymentFeeBeneficiary = 0;
-    const detectedPaymentFees: Array<{ type: string; amount: number; text: string }> = [];
     let isBorneByApplicant = false;
 
     for (const snippet of paymentSnippets) {
@@ -306,15 +319,27 @@ export function auditLcText(text: string, settings?: UserSettings): LcAuditResul
       if (tieredPayment) {
         totalPaymentFeeBeneficiary += tieredPayment.applicableFee;
         detectedPaymentFees.push({ type: 'Tiered Payment Charge', amount: tieredPayment.applicableFee, text: snippet.replace(/\s+/g, ' ') });
-      } else {
-        // Individual fee amount
-        const amountMatch = snippet.match(/(?:USD|EUR|GBP)?\s*(\d+(?:\.\d{2})?)/i);
-        if (amountMatch) {
-          const fee = parseFloat(amountMatch[1]);
-          if (fee > 0 && fee <= 300) {
-            totalPaymentFeeBeneficiary += fee;
-            detectedPaymentFees.push({ type: 'Charge', amount: fee, text: snippet.replace(/\s+/g, ' ') });
-          }
+        continue;
+      }
+
+      // Check "AN AMOUNT OF USD 50.00 AS DOCUMENT SETTLEMENT"
+      const docSettleMatch = snippet.match(/(?:AN\s+AMOUNT\s+OF\s+)?(?:USD|EUR|GBP)?\s*(\d+(?:\.\d{2})?)\s+AS\s+(?:DOCUMENT\s+)?SETTLEMENT/i);
+      if (docSettleMatch) {
+        const fee = parseFloat(docSettleMatch[1]);
+        if (fee > 0 && !detectedPaymentFees.some(f => f.amount === fee && f.type.includes('Settlement'))) {
+          totalPaymentFeeBeneficiary += fee;
+          detectedPaymentFees.push({ type: 'Document Settlement Charge', amount: fee, text: snippet.replace(/\s+/g, ' ') });
+          continue;
+        }
+      }
+
+      // Individual fee amount
+      const amountMatch = snippet.match(/(?:USD|EUR|GBP)?\s*(\d+(?:\.\d{2})?)/i);
+      if (amountMatch) {
+        const fee = parseFloat(amountMatch[1]);
+        if (fee > 0 && fee <= 300 && !detectedPaymentFees.some(f => f.amount === fee)) {
+          totalPaymentFeeBeneficiary += fee;
+          detectedPaymentFees.push({ type: 'Payment Charge', amount: fee, text: snippet.replace(/\s+/g, ' ') });
         }
       }
     }
@@ -360,26 +385,62 @@ export function auditLcText(text: string, settings?: UserSettings): LcAuditResul
     });
   }
 
-  // ==========================================
-  // RULE 3: Acceptance After Physical Receipt – Delete
-  // ==========================================
+  // 3. CABLE / SWIFT / TELEX CHARGES & CUMULATIVE CHARGES AUDIT:
+  //    - Extract Cable / SWIFT charge e.g. "RELATED CABLE COST USD 20.00"
+  //    - Flag if combined total bank charges (Discrepancy + Payment/Settlement + Cable/SWIFT) exceed USD 100.00
+  const cableMatches = [...normalizedText.matchAll(/(?:CABLE\s*(?:COST|CHARGE|FEE)|SWIFT\s*(?:COST|CHARGE|FEE)|TELEX\s*(?:COST|CHARGE|FEE))\s*(?:USD|EUR|GBP)?\s*(\d+(?:\.\d{2})?)/gi)];
+  let cableSwiftTotal = 0;
+  for (const cm of cableMatches) {
+    const cVal = parseFloat(cm[1]);
+    if (cVal > 0 && cVal <= 100) {
+      cableSwiftTotal += cVal;
+    }
+  }
+
+  const totalCumulativeCharges = (discAmt || 0) + (totalPaymentFeeBeneficiary || 0) + cableSwiftTotal;
+  if (totalCumulativeCharges > 100) {
+    const breakdownParts: string[] = [];
+    if (discAmt > 0) breakdownParts.push(`Discrepancy: USD ${discAmt.toFixed(2)}`);
+    if (totalPaymentFeeBeneficiary > 0) breakdownParts.push(`Payment/Settlement: USD ${totalPaymentFeeBeneficiary.toFixed(2)}`);
+    if (cableSwiftTotal > 0) breakdownParts.push(`Cable/SWIFT: USD ${cableSwiftTotal.toFixed(2)}`);
+
+    issues.push({
+      id: 'issue_cumulative_bank_charges_exceeded',
+      correctionId: 'total_bank_charges_limit',
+      title: `Total Combined Bank Charges Exceed USD 100.00 (Total: USD ${totalCumulativeCharges.toFixed(2)})`,
+      severity: 'warning',
+      reason: `The cumulative bank deductions in this LC total USD ${totalCumulativeCharges.toFixed(2)} (${breakdownParts.join(' + ')}), which exceeds the allowable threshold of USD 100.00. Heavy cumulative bank charges substantially reduce export revenue. Please cap all bank deductions at USD 25.00 in total.`,
+      detectedText: `Total bank charges: USD ${totalCumulativeCharges.toFixed(2)} (${breakdownParts.join(', ')})`,
+      suggestedDetails: {
+        maxChargeAmount: '25.00'
+      }
+    });
+  }
 
   // ==========================================
-  // RULE 3: Acceptance After Physical Receipt – Delete
+  // RULE 3: Acceptance After Physical Verification / Receipt – Delete
   // ==========================================
-  if (
+  const hasPhysicalVerificationMention =
+    upper.includes('PHYSICAL VERIFICATION') ||
+    upper.includes('VERIFICATION OF GOODS') ||
     upper.includes('PHYSICAL RECEIPT') ||
     upper.includes('RECEIPT OF GOODS') ||
-    upper.includes('CUSTOMS CLEARANCE') && upper.includes('ACCEPTANCE')
-  ) {
-    const snippet = extractSnippet(normalizedText, /(?:PHYSICAL RECEIPT|RECEIPT OF GOODS)[^\n.]{0,100}/i);
+    (upper.includes('CUSTOMS CLEARANCE') && upper.includes('ACCEPTANCE'));
+
+  if (hasPhysicalVerificationMention) {
+    const isPhysicalVerif = upper.includes('PHYSICAL VERIFICATION') || upper.includes('VERIFICATION OF GOODS');
+    const snippet = extractSnippet(normalizedText, /(?:ACCEPTANCE[\s\S]{0,60}?PHYSICAL\s*VERIFICATION[\s\S]{0,60}?(?:\.|$)|PHYSICAL\s*VERIFICATION[\s\S]{0,60}?(?:\.|$)|ACCEPTANCE\s+WILL\s+BE\s+GIVEN\s+AFTER[\s\S]{0,60}?(?:\.|$)|PHYSICAL\s*RECEIPT[\s\S]{0,60}?(?:\.|$)|RECEIPT\s*OF\s*GOODS[\s\S]{0,60}?(?:\.|$))/i);
     issues.push({
-      id: 'issue_physical_receipt',
-      correctionId: 'acceptance_after_receipt_deletion',
-      title: 'Acceptance After Physical Receipt Clause (Violates UCP 600)',
+      id: 'issue_physical_verification_clause',
+      correctionId: 'physical_verification_clause',
+      title: isPhysicalVerif
+        ? 'Physical Verification of Goods Clause – Delete (Violates UCP 600)'
+        : 'Acceptance After Physical Receipt Clause (Violates UCP 600)',
       severity: 'critical',
-      reason: 'Bill acceptance cannot be made conditional upon physical arrival or inspection of goods. Under UCP 600, payment/acceptance must be strictly against compliant documents.',
-      detectedText: snippet
+      reason: isPhysicalVerif
+        ? 'Bill acceptance or payment cannot be made conditional upon physical verification of goods (e.g. "ACCEPTANCE WILL BE GIVEN AFTER PHYSICAL VERIFICATION OF GOODS"). In accordance with UCP 600, banks deal with documents and not goods; acceptance must be strictly issued against compliant shipping documents.'
+        : 'Bill acceptance cannot be made conditional upon physical arrival or inspection of goods. Under UCP 600, payment/acceptance must be strictly against compliant documents.',
+      detectedText: snippet || (isPhysicalVerif ? 'Acceptance conditional upon physical verification of goods' : 'Acceptance after physical receipt of goods')
     });
   }
 
