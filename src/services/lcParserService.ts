@@ -64,6 +64,38 @@ export async function extractTextFromPdf(file: File): Promise<string> {
   return pageTexts.join('\n\n--- PAGE BREAK ---\n\n');
 }
 
+// Helper to parse tiered / slab fee clauses (e.g. UCBL, Bank Asia, Eastern Bank)
+function parseTieredFee(clauseText: string, lcAmount: number): { lowerFee: number; higherFee: number; threshold: number; applicableFee: number } | null {
+  const norm = clauseText.replace(/\s+/g, ' ');
+
+  // Pattern A (e.g. UCBL):
+  // "AT USD 25.00 AND USD 50.00 FOR BILL VALUE UPTO USD 5000.00 AND ABOVE USD 5000.00 RESPECTIVELY"
+  const patternA = /(?:USD|EUR|GBP)?\s*(\d+(?:\.\d{2})?)\s*(?:AND|\/)\s*(?:USD|EUR|GBP)?\s*(\d+(?:\.\d{2})?)[^.]*?(?:UP\s*TO|LESS\s+THAN)[^.]*?(?:USD|EUR|GBP)?\s*([\d,]+(?:\.\d{2})?)/i;
+  const matchA = norm.match(patternA);
+  if (matchA) {
+    const lowerFee = parseFloat(matchA[1]);
+    const higherFee = parseFloat(matchA[2]);
+    const threshold = parseFloat(matchA[3].replace(/,/g, ''));
+    const applicableFee = (lcAmount > threshold && lcAmount > 0) ? higherFee : lowerFee;
+    return { lowerFee, higherFee, threshold, applicableFee };
+  }
+
+  // Pattern B (e.g. Bank Asia, EBL):
+  // "USD 30.00 (LESS THAN DOCUMENT VALUE USD15,000) AND USD 50.00(DOCUMENT VALUE USD15,000 AND ABOVE)"
+  // or "USD 25.00 UP TO 20,000 AND USD 50.00 FOR ABOVE 20,000"
+  const patternB = /(?:USD|EUR|GBP)?\s*(\d+(?:\.\d{2})?)[^.]*?(?:UP\s*TO|LESS\s+THAN)[^.]*?(?:USD|EUR|GBP)?\s*([\d,]+(?:\.\d{2})?)[^.]*?(?:AND|\/)\s*(?:USD|EUR|GBP)?\s*(\d+(?:\.\d{2})?)/i;
+  const matchB = norm.match(patternB);
+  if (matchB) {
+    const lowerFee = parseFloat(matchB[1]);
+    const threshold = parseFloat(matchB[2].replace(/,/g, ''));
+    const higherFee = parseFloat(matchB[3]);
+    const applicableFee = (lcAmount >= threshold && lcAmount > 0) ? higherFee : lowerFee;
+    return { lowerFee, higherFee, threshold, applicableFee };
+  }
+
+  return null;
+}
+
 /**
  * Parses SWIFT MT700 / LC fields and checks standard commercial audit rules.
  */
@@ -168,19 +200,11 @@ export function auditLcText(text: string, settings?: UserSettings): LcAuditResul
   if (discIndex !== -1) {
     const clauseSnippet = normalizedText.substring(discIndex, discIndex + 300);
 
-    // Check for tiered discrepancy clause with slab threshold (e.g. 15,000 / 20,000)
-    const tieredMatch = clauseSnippet.match(/USD\s*(\d+(?:\.\d{2})?)[^\n.]*?LESS\s+THAN[^\n.]*?(\d{1,3}(?:,\d{3})*|\d+)[^\n.]*?AND\s+(?:USD)?\s*(\d+(?:\.\d{2})?)/i);
-    if (tieredMatch) {
-      const lowerFee = parseFloat(tieredMatch[1]);
-      const threshold = parseFloat(tieredMatch[2].replace(/,/g, ''));
-      const higherFee = parseFloat(tieredMatch[3]);
-      if (numericLcAmount >= threshold && numericLcAmount > 0) {
-        discAmt = higherFee;
-        discStr = higherFee.toFixed(2);
-      } else {
-        discAmt = lowerFee;
-        discStr = lowerFee.toFixed(2);
-      }
+    // Check for tiered discrepancy clause with slab threshold (e.g. UCBL, Bank Asia, Eastern Bank)
+    const tieredDisc = parseTieredFee(clauseSnippet, numericLcAmount);
+    if (tieredDisc) {
+      discAmt = tieredDisc.applicableFee;
+      discStr = tieredDisc.applicableFee.toFixed(2);
     } else {
       // Find candidate discrepancy fee numbers like USD 30.00, USD 50.00, USD 100.00 (excluding threshold figures)
       const feeMatches = [...clauseSnippet.matchAll(/(?:USD|EUR|GBP)?\s*(\d{2,3}(?:\.\d{2})?)\b(?!\s*,\s*000|\s*000)/gi)];
@@ -250,9 +274,9 @@ export function auditLcText(text: string, settings?: UserSettings): LcAuditResul
                                   /DEDUCT\s+(?:PAYMENT|SETTLEMENT|REIMBURSEMENT)\s+CHARGE/i.test(normalizedText);
 
   if (hasAnyPaymentFeeMention) {
-    // Extract candidate snippets around payment/settlement charges
+    // Extract candidate snippets around payment/settlement charges (multi-line supported)
     const paymentSnippets: string[] = [];
-    const paymentRegexGlobal = /(?:(?:WE\s+WILL\s+DEDUCT\s+)?(?:PAYMENT|REIMBURSEMENT|SETTLEMENT|FUND\s*TRANSFER|RTGS)\s*(?:PROCESSING\s*)?(?:CHARGE|COMMISSION|FEE)[S]?[^\n.]*)/gi;
+    const paymentRegexGlobal = /(?:(?:WE\s+(?:WILL|SHALL)\s+DEDUCT\s+)?(?:PAYMENT|REIMBURSEMENT|SETTLEMENT|FUND\s*TRANSFER|RTGS)\s*(?:PROCESSING\s*)?(?:CHARGE|COMMISSION|FEE)[S]?[\s\S]*?(?:\.(?!\d)\s*(?=[A-Z:\n])|(?=:[0-9]{2}[A-Z]?:|F[0-9]{2}[A-Z]?:)|\n\s*\.|$))/gi;
     let pMatch;
     while ((pMatch = paymentRegexGlobal.exec(normalizedText)) !== null) {
       paymentSnippets.push(pMatch[0].trim());
@@ -266,25 +290,22 @@ export function auditLcText(text: string, settings?: UserSettings): LcAuditResul
       const upperSnippet = snippet.toUpperCase();
       // Check if this specific charge is explicitly for applicant's account
       if (
-        upperSnippet.includes("APPLICANT'S ACCOUNT") ||
-        upperSnippet.includes("FOR APPLICANT ACCOUNT") ||
-        upperSnippet.includes("FOR ACCOUNT OF APPLICANT") ||
-        upperSnippet.includes("BORNE BY APPLICANT") ||
-        upperSnippet.includes("BUYER'S ACCOUNT")
+        (upperSnippet.includes("APPLICANT'S ACCOUNT") ||
+         upperSnippet.includes("FOR APPLICANT ACCOUNT") ||
+         upperSnippet.includes("FOR ACCOUNT OF APPLICANT") ||
+         upperSnippet.includes("BORNE BY APPLICANT") ||
+         upperSnippet.includes("BUYER'S ACCOUNT")) &&
+        !upperSnippet.includes("BENEFICIARY")
       ) {
         isBorneByApplicant = true;
         continue;
       }
 
-      // Check tiered slab in payment snippet (e.g. EBL: USD 25 for <= 20,000 and USD 50 for > 20,000)
-      const tieredPaymentMatch = snippet.match(/USD\s*(\d+(?:\.\d{2})?)[^\n.]*?UP\s+TO[^\n.]*?(\d{1,3}(?:,\d{3})*|\d+)[^\n.]*?AND\s+(?:USD)?\s*(\d+(?:\.\d{2})?)/i);
-      if (tieredPaymentMatch) {
-        const lowerFee = parseFloat(tieredPaymentMatch[1]);
-        const threshold = parseFloat(tieredPaymentMatch[2].replace(/,/g, ''));
-        const higherFee = parseFloat(tieredPaymentMatch[3]);
-        const applicableFee = (numericLcAmount > threshold && numericLcAmount > 0) ? higherFee : lowerFee;
-        totalPaymentFeeBeneficiary += applicableFee;
-        detectedPaymentFees.push({ type: 'Tiered Payment Charge', amount: applicableFee, text: snippet });
+      // Check tiered slab in payment snippet
+      const tieredPayment = parseTieredFee(snippet, numericLcAmount);
+      if (tieredPayment) {
+        totalPaymentFeeBeneficiary += tieredPayment.applicableFee;
+        detectedPaymentFees.push({ type: 'Tiered Payment Charge', amount: tieredPayment.applicableFee, text: snippet.replace(/\s+/g, ' ') });
       } else {
         // Individual fee amount
         const amountMatch = snippet.match(/(?:USD|EUR|GBP)?\s*(\d+(?:\.\d{2})?)/i);
@@ -292,18 +313,20 @@ export function auditLcText(text: string, settings?: UserSettings): LcAuditResul
           const fee = parseFloat(amountMatch[1]);
           if (fee > 0 && fee <= 300) {
             totalPaymentFeeBeneficiary += fee;
-            detectedPaymentFees.push({ type: 'Charge', amount: fee, text: snippet });
+            detectedPaymentFees.push({ type: 'Charge', amount: fee, text: snippet.replace(/\s+/g, ' ') });
           }
         }
       }
     }
 
-    // Also check Field 78 direct payment deduction statement e.g. Bank Asia: USD 30
-    const f78DeductMatch = normalizedText.match(/DEDUCT\s+PAYMENT\s+CHARGE\s+(?:USD)?\s*(\d+(?:\.\d{2})?)/i);
-    if (f78DeductMatch && !detectedPaymentFees.some(f => f.amount === parseFloat(f78DeductMatch[1]))) {
-      const f78Amt = parseFloat(f78DeductMatch[1]);
-      totalPaymentFeeBeneficiary += f78Amt;
-      detectedPaymentFees.push({ type: 'Field 78 Payment Deduction', amount: f78Amt, text: f78DeductMatch[0] });
+    // Also check Field 78 direct payment deduction statement e.g. "LESS USD 30.00 AS PAYMENT CHARGE" or "DEDUCT PAYMENT CHARGE USD 30"
+    const f78DeductMatch = normalizedText.match(/(?:(?:DEDUCT|LESS)\s+(?:PAYMENT|SETTLEMENT|REIMBURSEMENT)\s+CHARGE\s+(?:USD)?\s*(\d+(?:\.\d{2})?)|(?:DEDUCT|LESS)\s+(?:USD|EUR|GBP)?\s*(\d+(?:\.\d{2})?)\s+(?:AS\s+)?(?:PAYMENT|SETTLEMENT|REIMBURSEMENT)\s+CHARGE)/i);
+    if (f78DeductMatch) {
+      const feeVal = parseFloat(f78DeductMatch[1] || f78DeductMatch[2]);
+      if (feeVal > 0 && !detectedPaymentFees.some(f => f.amount === feeVal)) {
+        totalPaymentFeeBeneficiary += feeVal;
+        detectedPaymentFees.push({ type: 'Field 78 Payment Deduction', amount: feeVal, text: f78DeductMatch[0] });
+      }
     }
 
     // If total fees on beneficiary exceed USD 25.00 (and not borne by applicant)
@@ -745,16 +768,41 @@ function parseFlexibleDate(dateStr: string): Date | null {
 }
 
 function extractAmount(text: string): { currency?: string; amount?: string } {
-  // SWIFT Tag 32B or F32B (handling format like: Currency: USD Amount: 54450,00)
-  const match32B = text.match(/(?::32B:|F32B:[^\n]*Currency[^\n]*)\s*(?:Currency:)?\s*([A-Z]{3})[\s\S]{0,60}?(?:Amount:\s*)?([0-9,.]+)/i);
-  if (match32B) {
+  // Case 1: Look directly around :32B: or F32B:
+  // SWIFT MT700 field 32B format: :32B:YYMMDD[CUR][AMOUNT] or :32B: Currency Code, Amount\nUSD20935,
+  // or F32B: Currency: USD Amount: 32219, #32219,#
+  const tag32bMatch = text.match(/(?::32B:|F32B:[^\n]*Currency[^\n]*)[^\n]*\n?([\s\S]{1,120}?(?=\n:[0-9]{2}|\nF[0-9]{2}|$))/i);
+  if (tag32bMatch) {
+    const block = tag32bMatch[1];
+    
+    // Check if currency code exists in block
+    const currMatch = block.match(/\b(USD|EUR|GBP|BDT|JPY|CNY|CHF)\b/i);
+    if (currMatch) {
+      const currency = currMatch[1].toUpperCase();
+      // Extract amount following the currency or Amount: keyword
+      const afterCurrency = block.substring(currMatch.index! + currMatch[0].length);
+      const amtMatch = afterCurrency.match(/\s*(?:Amount:\s*)?#?([0-9]{1,3}(?:,[0-9]{3})+(?:\.[0-9]{2})?|[0-9]+(?:\.[0-9]{2})?|[0-9]+)/i) ||
+                       block.match(/Amount:\s*#?([0-9]{1,3}(?:,[0-9]{3})+(?:\.[0-9]{2})?|[0-9]+(?:\.[0-9]{2})?|[0-9]+)/i);
+      if (amtMatch) {
+        return {
+          currency,
+          amount: amtMatch[1].trim()
+        };
+      }
+    }
+  }
+
+  // Fallback 1: Direct SWIFT code inline e.g. :32B:USD20935, or :32B:261028USD20935,
+  const inlineMatch = text.match(/:32B:\s*(?:\d{6})?\s*(USD|EUR|GBP|BDT|JPY|CNY|CHF)\s*([0-9]{1,3}(?:,[0-9]{3})+(?:\.[0-9]{2})?|[0-9]+(?:\.[0-9]{2})?|[0-9]+)/i);
+  if (inlineMatch) {
     return {
-      currency: match32B[1].toUpperCase(),
-      amount: match32B[2].trim()
+      currency: inlineMatch[1].toUpperCase(),
+      amount: inlineMatch[2].trim()
     };
   }
 
-  const matchLabel = text.match(/(?:LC\s*AMOUNT|AMOUNT)\s*[:#]?\s*([A-Z]{3})\s*([0-9,.]+)/i);
+  // Fallback 2: Label match e.g. "LC AMOUNT: USD 20,935.00" or "TOTAL VALUE USD 32,219.00"
+  const matchLabel = text.match(/(?:LC\s*AMOUNT|TOTAL\s*VALUE|AMOUNT)\s*[:#]?\s*(USD|EUR|GBP|BDT|JPY|CNY|CHF)\s*([0-9]{1,3}(?:,[0-9]{3})+(?:\.[0-9]{2})?|[0-9]+(?:\.[0-9]{2})?|[0-9]+)/i);
   if (matchLabel) {
     return {
       currency: matchLabel[1].toUpperCase(),
