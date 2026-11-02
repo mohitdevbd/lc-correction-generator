@@ -466,7 +466,9 @@ export const LcAutoScanner: React.FC<LcAutoScannerProps> = ({
                                   <div className="flex items-center gap-1.5 text-[11px] font-bold">
                                     <span className="inline-flex items-center space-x-1 rounded-md bg-rose-50 px-2 py-0.5 text-rose-700 border border-rose-200">
                                       <User className="h-3 w-3 mr-0.5 text-rose-600" />
-                                      <span>Beneficiary: USD {issue.chargeBreakdown.totalBeneficiary.toFixed(2)}</span>
+                                      <span>
+                                        Beneficiary: {issue.chargeBreakdown.totalBeneficiary > 0 ? `USD ${issue.chargeBreakdown.totalBeneficiary.toFixed(2)}` : 'ক্লজ অনুপস্থিত / অনির্ধারিত'}
+                                      </span>
                                     </span>
                                     {issue.chargeBreakdown.totalApplicant > 0 && (
                                       <span className="inline-flex items-center space-x-1 rounded-md bg-emerald-50 px-2 py-0.5 text-emerald-700 border border-emerald-200">
@@ -501,14 +503,18 @@ export const LcAutoScanner: React.FC<LcAutoScannerProps> = ({
                                             >
                                               {isBene ? '👤 Beneficiary বহন করবে' : '🏢 Buyer / Applicant বহন করবে (No Flag)'}
                                             </span>
-                                            {item.isExceeding && (
+                                            {item.amount === 0 ? (
+                                              <span className="inline-flex items-center rounded bg-amber-100 px-1.5 py-0.2 text-[10px] font-bold text-amber-900 border border-amber-300">
+                                                ⚠️ অনির্ধারিত / ক্লজ অনুপস্থিত
+                                              </span>
+                                            ) : item.isExceeding ? (
                                               <span className="inline-flex items-center rounded bg-amber-100 px-1.5 py-0.2 text-[10px] font-bold text-amber-900 border border-amber-300">
                                                 ⚠️ সীমা অতিক্রম ($25 Max)
                                               </span>
-                                            )}
+                                            ) : null}
                                           </div>
                                           <span className={`font-mono font-bold text-xs shrink-0 ml-2 ${isBene ? 'text-rose-700' : 'text-emerald-700'}`}>
-                                            USD {item.amount.toFixed(2)}
+                                            {item.amount > 0 ? `USD ${item.amount.toFixed(2)}` : 'USD — (অনির্ধারিত)'}
                                           </span>
                                         </div>
                                         {item.clauseSnippet && (

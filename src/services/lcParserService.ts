@@ -268,13 +268,20 @@ export function auditLcText(text: string, settings?: UserSettings): LcAuditResul
       chargesBlock.includes('OUTSIDE ISSUING BANK') ||
       chargesBlock.includes("OUTSIDE ISSUING BANK'S") ||
       chargesBlock.includes('OUT SIDE ISSUING BANK') ||
-      chargesBlock.includes("OUT SIDE ISSUING BANK'S");
+      chargesBlock.includes("OUT SIDE ISSUING BANK'S") ||
+      chargesBlock.includes('OUTSIDE OUR COUNTER') ||
+      chargesBlock.includes('OUT SIDE OUR COUNTER') ||
+      chargesBlock.includes('OUTSIDE OF OUR COUNTER') ||
+      chargesBlock.includes('OUTSIDE BANGLADESH');
 
     const hasBeneficiaryCharge =
       chargesBlock.includes('FOR ACCOUNT OF BENEFICIARY') ||
       chargesBlock.includes("FOR BENEFICIARY'S ACCOUNT") ||
       chargesBlock.includes('FOR BENEFICIARY ACCOUNT') ||
       chargesBlock.includes('ON ACCOUNT OF BENEFICIARY') ||
+      chargesBlock.includes("ON BENEFICIARY'S ACCOUNT") ||
+      chargesBlock.includes('ON BENEFICIARY ACCOUNT') ||
+      chargesBlock.includes('ARE ON BENEFICIARY') ||
       chargesBlock.includes('BORNE BY BENEFICIARY');
 
     const hasReimbursementOnBeneficiary =
@@ -309,6 +316,11 @@ export function auditLcText(text: string, settings?: UserSettings): LcAuditResul
   // ==========================================
   // RULE 2: Discrepancy Fee & Payment/Settlement/Reimbursement/RTGS/Cable Charges Audit
   // ==========================================
+  // Exclude Field 71D so Tag 71D banking charges are audited completely separately from Tag 47A / conditions
+  const textWithout71D = normalizedText.replace(
+    /(?::71D:|:71B:|F71D:[^\n]*Charges)[ \t]*(?:Charges[ \t]*)?[:#]?[\s\S]*?(?=(?:\n:[0-9]{2}|\s+:[0-9]{2}:|\nF[0-9]{2}|$))/i,
+    ''
+  );
   const numericLcAmount = detectedAmount ? parseFloat(detectedAmount.replace(/,/g, '')) : 0;
 
   // 1. DISCREPANCY FEE AUDIT:
@@ -324,7 +336,7 @@ export function auditLcText(text: string, settings?: UserSettings): LcAuditResul
     `(?:(?:[0-9]{1,2}|[A-Z])[\\.\\)]\\s*)?(?:IN\\s+CASE\\s+OF\\s+DISCREPA[A-Z]*|DISCREPA[A-Z]*\\s*(?:FEE|CHARGE|COMMISSION|COST|DOCUMENTS?)?)[^\\n]*[\\s\\S]*?${conditionBoundary}`,
     'i'
   );
-  const discMatch = normalizedText.match(discRegex);
+  const discMatch = textWithout71D.match(discRegex);
   let cleanDiscSnippet = '';
 
   if (discMatch) {
@@ -332,10 +344,10 @@ export function auditLcText(text: string, settings?: UserSettings): LcAuditResul
     cleanDiscSnippet = discMatch[0].trim();
     discSnippet = cleanDiscSnippet.replace(/\s+/g, ' ');
   } else {
-    const discIndex = normalizedText.search(/DISCREPA/i);
+    const discIndex = textWithout71D.search(/DISCREPA/i);
     if (discIndex !== -1) {
       hasDiscrepancyMention = true;
-      const clauseSnippet = normalizedText.substring(discIndex, discIndex + 400);
+      const clauseSnippet = textWithout71D.substring(discIndex, discIndex + 400);
       const tagStop = clauseSnippet.search(/(?:\n\s*:[0-9]{2}[A-Z]?:|\n\s*F[0-9]{2}[A-Z]?:|:[0-9]{2}:|\n\s*(?:[0-9]{1,2}\.|\b[A-Z]\.))/);
       cleanDiscSnippet = tagStop !== -1 ? clauseSnippet.substring(0, tagStop) : clauseSnippet;
       discSnippet = cleanDiscSnippet.replace(/\s+/g, ' ');
@@ -373,10 +385,10 @@ export function auditLcText(text: string, settings?: UserSettings): LcAuditResul
   const paymentFeeRegex = /(?:PAYMENT|REIMBURSEMENT|SETTLEMENT|DOCUMENT\s*SETTLEMENT|FUND\s*TRANSFER|RTGS)\s*(?:PROCESSING\s*)?(?:CHARGE|COMMISSION|FEE|COST|EXPENSE|OF\s+USD|AT\s+USD)/i;
   const paymentDeductRegex = /(?:(?:WE\s+)?(?:WILL|SHALL)\s+BE\s+DEDUCTED|WE\s+WILL\s+DEDUCT|DEDUCTED\s+FROM\s+(?:THE\s+)?BILL\s+VALUE)[\s\S]{1,60}?(?:AT\s+THE\s+TIME\s+OF\s+PAYMENT|PAYMENT)/i;
   const docSettlementRegex = /(?:AN\s+AMOUNT\s+OF\s+)?(?:USD|EUR|GBP)?\s*[\d.]+\s+AS\s+(?:DOCUMENT\s+)?SETTLEMENT/i;
-  const hasAnyPaymentFeeMention = paymentFeeRegex.test(normalizedText) ||
-                                  paymentDeductRegex.test(normalizedText) ||
-                                  docSettlementRegex.test(normalizedText) ||
-                                  /DEDUCT\s+(?:PAYMENT|SETTLEMENT|REIMBURSEMENT)\s+CHARGE/i.test(normalizedText);
+  const hasAnyPaymentFeeMention = paymentFeeRegex.test(textWithout71D) ||
+                                  paymentDeductRegex.test(textWithout71D) ||
+                                  docSettlementRegex.test(textWithout71D) ||
+                                  /DEDUCT\s+(?:PAYMENT|SETTLEMENT|REIMBURSEMENT)\s+CHARGE/i.test(textWithout71D);
 
   let totalPaymentFeeBeneficiary = 0;
   let totalPaymentFeeApplicant = 0;
@@ -390,7 +402,7 @@ export function auditLcText(text: string, settings?: UserSettings): LcAuditResul
       'gi'
     );
     let pMatch;
-    while ((pMatch = paymentRegexGlobal.exec(normalizedText)) !== null) {
+    while ((pMatch = paymentRegexGlobal.exec(textWithout71D)) !== null) {
       const snippet = pMatch[0].trim();
       const upperSnippet = snippet.toUpperCase();
 
@@ -415,8 +427,8 @@ export function auditLcText(text: string, settings?: UserSettings): LcAuditResul
           feeVal = parseFloat(docSettleMatch[1]);
           feeType = 'Document Settlement Charge';
         } else {
-          const amtM = snippet.match(/(?:USD|EUR|GBP)?\s*(\d+(?:\.\d{2})?)/i);
-          if (amtM) feeVal = parseFloat(amtM[1]);
+          const amtM = snippet.match(/(?:(?:USD|EUR|GBP)\s*(\d{2,3}(?:\.\d{2})?)|(?:CHARGE|FEE|COMMISSION|COST|DEDUCT(?:ED)?|OF|AT)\s+(?:USD|EUR|GBP)?\s*(\d{2,3}(?:\.\d{2})?)|(\d{2,3}(?:\.\d{2})?)\s*(?:USD|EUR|GBP))\b/i);
+          if (amtM) feeVal = parseFloat(amtM[1] || amtM[2] || amtM[3]);
         }
       }
 
@@ -443,7 +455,7 @@ export function auditLcText(text: string, settings?: UserSettings): LcAuditResul
   }
 
   // 3. CABLE / SWIFT / TELEX CHARGES AUDIT:
-  const cableMatches = [...normalizedText.matchAll(/(?:CABLE\s*(?:COST|CHARGE|FEE)|SWIFT\s*(?:COST|CHARGE|FEE)|TELEX\s*(?:COST|CHARGE|FEE))\s*(?:USD|EUR|GBP)?\s*(\d+(?:\.\d{2})?)/gi)];
+  const cableMatches = [...textWithout71D.matchAll(/(?:CABLE\s*(?:COST|CHARGE|FEE)|SWIFT\s*(?:COST|CHARGE|FEE)|TELEX\s*(?:COST|CHARGE|FEE))\s*(?:USD|EUR|GBP)?\s*(\d+(?:\.\d{2})?)/gi)];
   let cableSwiftTotal = 0;
   for (const cm of cableMatches) {
     const cVal = parseFloat(cm[1]);
@@ -519,12 +531,35 @@ export function auditLcText(text: string, settings?: UserSettings): LcAuditResul
       id: 'issue_missing_discrepancy_payment_clauses',
       correctionId: 'discrepancy_payment_charges_revision',
       title: 'Missing Discrepancy & Payment Charge Clauses',
-      severity: 'info',
+      severity: 'warning',
       reason: 'No clauses are defined in the LC regarding discrepancy handling fees or payment/settlement charges. Please add standard clauses capping discrepancy at max USD 25.00 and payment at max USD 25.00, not exceeding USD 50.00 in total.',
       detectedText: 'No discrepancy or payment charge clause found in LC conditions',
+      chargeBreakdown: {
+        totalBeneficiary: 0,
+        totalApplicant: 0,
+        items: [
+          {
+            type: 'Discrepancy Fee',
+            amount: 0,
+            currency: detectedCurrency || 'USD',
+            payer: 'Beneficiary',
+            clauseSnippet: 'No discrepancy clause found in LC conditions',
+            isExceeding: true
+          },
+          {
+            type: 'Payment Charge',
+            amount: 0,
+            currency: detectedCurrency || 'USD',
+            payer: 'Beneficiary',
+            clauseSnippet: 'No payment/settlement clause found in LC conditions',
+            isExceeding: true
+          }
+        ],
+        summaryText: 'Discrepancy & Payment Charge Clauses Missing from LC'
+      },
       suggestedDetails: {
-        discrepancyChargeInLc: 'Missing',
-        paymentChargeInLc: 'Missing',
+        discrepancyChargeInLc: 'Unspecified',
+        paymentChargeInLc: 'Unspecified',
         acceptableDiscrepancyCharge: '25.00',
         acceptablePaymentCharge: '25.00'
       }
@@ -842,57 +877,7 @@ export function auditLcText(text: string, settings?: UserSettings): LcAuditResul
     // Note: Standard "120 DAYS FROM THE DATE OF ACCEPTANCE", "90 DAYS...", "AT SIGHT" etc. are ACCEPTABLE and NOT flagged.
   }
 
-  // ==========================================
-  // RULE 7D: Unspecified / Open-Ended Discrepancy & Payment Charges (Field 71D)
-  // ==========================================
-  // In many LCs (like UCB, Jamuna, etc.), Field 71D says:
-  // "ALL CHARGES OUTSIDE OUR COUNTER INCLUDING PAYMENT CHARGE AND DISCREPANCY CHARGE ARE ON BENEFICIARY'S ACCOUNT"
-  // without specifying the exact dollar limit (e.g., USD 25.00). This allows the bank to deduct arbitrary or high fees.
-  if (
-    chargesBlock &&
-    (chargesBlock.includes('DISCREPANCY') || chargesBlock.includes('PAYMENT CHARGE')) &&
-    discAmt === 0 && totalPaymentFeeBeneficiary === 0
-  ) {
-    const unspecSnippet = extractSnippet(normalizedText, /(?:INCLUDING|AND)[\s\S]{0,80}(?:PAYMENT|DISCREPANCY)[\s\S]{0,80}BENEFICIARY/i) ||
-                          extractSnippet(normalizedText, /:71D:[\s\S]{0,120}/i);
-    issues.push({
-      id: 'issue_unspecified_charges',
-      correctionId: 'discrepancy_payment_charges_revision',
-      title: 'Missing Discrepancy & Payment Charge Clauses (Field 71D Uncapped)',
-      severity: 'warning',
-      reason: 'Field 71D mentions payment & discrepancy charges on beneficiary without any defined limits or clauses in the LC conditions. Please add standard clauses capping discrepancy at max USD 25.00 and payment at max USD 25.00, not exceeding USD 50.00 in total.',
-      detectedText: unspecSnippet || 'Payment charge and discrepancy charge are on beneficiary account without fixed amount.',
-      chargeBreakdown: {
-        totalBeneficiary: 0,
-        totalApplicant: 0,
-        items: [
-          {
-            type: 'Discrepancy Fee',
-            amount: 0,
-            currency: detectedCurrency || 'USD',
-            payer: 'Beneficiary',
-            clauseSnippet: unspecSnippet,
-            isExceeding: true
-          },
-          {
-            type: 'Payment Charge',
-            amount: 0,
-            currency: detectedCurrency || 'USD',
-            payer: 'Beneficiary',
-            clauseSnippet: unspecSnippet,
-            isExceeding: true
-          }
-        ],
-        summaryText: 'Discrepancy & Payment charges mentioned in Field 71D without defined rate/clause'
-      },
-      suggestedDetails: {
-        discrepancyChargeInLc: 'Unspecified',
-        paymentChargeInLc: 'Unspecified',
-        acceptableDiscrepancyCharge: '25.00',
-        acceptablePaymentCharge: '25.00'
-      }
-    });
-  }
+
 
   // ==========================================
   // RULE 7E: Missing Overdue Interest Clause Check (ONLY for Usance / Deferred LCs)
