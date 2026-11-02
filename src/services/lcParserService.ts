@@ -317,7 +317,14 @@ export function auditLcText(text: string, settings?: UserSettings): LcAuditResul
   let isDiscOnApplicant = false;
   let discSnippet = '';
 
-  const discMatch = normalizedText.match(/(?:[0-9]{1,2}\.\s*)?(?:IN\s+CASE\s+OF\s+DISCREPA[A-Z]*|DISCREPA[A-Z]*\s*(?:FEE|CHARGE|COMMISSION|COST|DOCUMENTS?)?)[^\n]*[\s\S]*?(?=(?:\n\s*[0-9]{1,2}\.|\n\s*:[0-9]{2}[A-Z]?:|\n\s*F[0-9]{2}[A-Z]?:|\n\s*ALL CHARGES|$))/i);
+  // Top-level condition boundary: stops before next numbered (e.g. 1. or 10.) or lettered (e.g. A. or G.) condition, or SWIFT tag (:XX:, FXX:), or ALL CHARGES
+  const conditionBoundary = '(?=(?:\\n\\s*(?:[0-9]{1,2}\\.|\\b[A-Z]\\.)|\\n\\s*:[0-9]{2}[A-Z]?:|\\n\\s*F[0-9]{2}[A-Z]?:|\\n\\s*ALL CHARGES|$))';
+
+  const discRegex = new RegExp(
+    `(?:(?:[0-9]{1,2}|[A-Z])[\\.\\)]\\s*)?(?:IN\\s+CASE\\s+OF\\s+DISCREPA[A-Z]*|DISCREPA[A-Z]*\\s*(?:FEE|CHARGE|COMMISSION|COST|DOCUMENTS?)?)[^\\n]*[\\s\\S]*?${conditionBoundary}`,
+    'i'
+  );
+  const discMatch = normalizedText.match(discRegex);
   let cleanDiscSnippet = '';
 
   if (discMatch) {
@@ -329,7 +336,7 @@ export function auditLcText(text: string, settings?: UserSettings): LcAuditResul
     if (discIndex !== -1) {
       hasDiscrepancyMention = true;
       const clauseSnippet = normalizedText.substring(discIndex, discIndex + 400);
-      const tagStop = clauseSnippet.search(/(?:\n\s*:[0-9]{2}[A-Z]?:|\n\s*F[0-9]{2}[A-Z]?:|:[0-9]{2}:|\n\s*[0-9]{1,2}\.)/);
+      const tagStop = clauseSnippet.search(/(?:\n\s*:[0-9]{2}[A-Z]?:|\n\s*F[0-9]{2}[A-Z]?:|:[0-9]{2}:|\n\s*(?:[0-9]{1,2}\.|\b[A-Z]\.))/);
       cleanDiscSnippet = tagStop !== -1 ? clauseSnippet.substring(0, tagStop) : clauseSnippet;
       discSnippet = cleanDiscSnippet.replace(/\s+/g, ' ');
     }
@@ -376,7 +383,12 @@ export function auditLcText(text: string, settings?: UserSettings): LcAuditResul
   const detectedPaymentFees: Array<{ type: string; amount: number; payer: string; text: string }> = [];
 
   if (hasAnyPaymentFeeMention) {
-    const paymentRegexGlobal = /(?:(?:[0-9]{1,2}\.\s*)?(?:PAYMENT\s+CHARGE|SETTLEMENT\s+CHARGE|REIMBURSEMENT\s+CHARGE|DOCUMENT\s+SETTLEMENT|FUND\s+TRANSFER\s+CHARGE|RTGS\s+CHARGE|WE\s+(?:WILL|SHALL)\s+DEDUCT[\s\S]{1,60}?(?:AT\s+THE\s+TIME\s+OF\s+PAYMENT|PAYMENT))[\s\S]*?(?=(?:\n\s*[0-9]{1,2}\.|\n\s*:[0-9]{2}[A-Z]?:|\n\s*F[0-9]{2}[A-Z]?:|\n\s*ALL CHARGES|$)))|(?:(?:AN\s+AMOUNT\s+OF\s+)?(?:USD|EUR|GBP)?\s*[\d.]+\s+AS\s+(?:DOCUMENT\s+)?SETTLEMENT[\s\S]*?(?=(?:\n\s*[0-9]{1,2}\.|\n\s*:[0-9]{2}[A-Z]?:|\n\s*F[0-9]{2}[A-Z]?:|\n\s*ALL CHARGES|$)))/gi;
+    const paymentRegexGlobal = new RegExp(
+      `(?:(?:(?:[0-9]{1,2}|[A-Z])[\\.\\)]\\s*)?(?:PAYMENT|SETTLEMENT|REIMBURSEMENT|DOCUMENT\\s*SETTLEMENT|FUND\\s*TRANSFER|RTGS)\\s*(?:PROCESSING\\s*)?(?:CHARGE|COMMISSION|FEE|COST|EXPENSE)[S]?[\\s\\S]*?${conditionBoundary})` +
+      `|(?:(?:[0-9]{1,2}|[A-Z])[\\.\\)]\\s*)?(?:(?:WE\\s+)?(?:WILL|SHALL)\\s+(?:BE\\s+)?DEDUCT(?:ED)?[\\s\\S]{1,60}?(?:AT\\s+THE\\s+TIME\\s+OF\\s+PAYMENT|PAYMENT))[\\s\\S]*?${conditionBoundary}` +
+      `|(?:(?:AN\\s+AMOUNT\\s+OF\\s+)?(?:USD|EUR|GBP)?\\s*[\\d.]+\\s+AS\\s+(?:DOCUMENT\\s+)?SETTLEMENT[\\s\\S]*?${conditionBoundary})`,
+      'gi'
+    );
     let pMatch;
     while ((pMatch = paymentRegexGlobal.exec(normalizedText)) !== null) {
       const snippet = pMatch[0].trim();
