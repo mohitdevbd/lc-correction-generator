@@ -147,7 +147,7 @@ export function auditLcText(text: string, settings?: UserSettings): LcAuditResul
   // ==========================================
   // RULE 1: Field 71D – Genuinely Problematic Charges on Beneficiary
   // ==========================================
-  const chargesMatch = normalizedText.match(/(?::71D:|:71B:|F71D:[^\n]*Charges)[^\n:]*[:#]?\s*([\s\S]{1,600}?)(?=(?:\n:\d{2}[A-Z]?:|\n\s*F\d{2}[A-Z]?:|\n\s*[A-Z\s]{4,}:|$))/i);
+  const chargesMatch = normalizedText.match(/(?::71D:|:71B:|F71D:[^\n]*Charges)[ \t]*(?:Charges[ \t]*)?[:#]?\s*([\s\S]{1,400}?)(?=(?:\n:[0-9]{2}|\s+:[0-9]{2}:|\nF[0-9]{2}|$))/i);
   const chargesBlock = chargesMatch ? chargesMatch[1].toUpperCase() : '';
 
   if (chargesBlock) {
@@ -196,198 +196,118 @@ export function auditLcText(text: string, settings?: UserSettings): LcAuditResul
   }
 
   // ==========================================
-  // RULE 2: Discrepancy Fee & Payment/Settlement/Reimbursement/RTGS Charges Audit
+  // RULE 2: Discrepancy Fee & Payment/Settlement/Reimbursement/RTGS/Cable Charges Audit
   // ==========================================
-  // 1. DISCREPANCY FEE AUDIT:
-  //    - Maximum acceptable limit is USD 25.00.
-  //    - If slab exists (e.g. Bank Asia: <15k vs >=15k), checks applicable fee based on LC amount.
-  //    - If fee > 25, flag it.
-  //    - If no discrepancy fee clause is found in LC, flag to request a discrepancy cap clause.
   const numericLcAmount = detectedAmount ? parseFloat(detectedAmount.replace(/,/g, '')) : 0;
+
+  // 1. DISCREPANCY FEE AUDIT:
   let discAmt = 0;
-  let discStr = '';
+  let hasDiscrepancyMention = false;
+  let isDiscOnApplicant = false;
+  let discSnippet = '';
 
   const discIndex = normalizedText.search(/DISCREPA/i);
   if (discIndex !== -1) {
+    hasDiscrepancyMention = true;
     const clauseSnippet = normalizedText.substring(discIndex, discIndex + 300);
+    // Cut snippet before next SWIFT tag e.g. :48:, :49:, :78:
+    const tagStop = clauseSnippet.search(/(?:\n\s*:[0-9]{2}[A-Z]?:|\n\s*F[0-9]{2}[A-Z]?:|:[0-9]{2}:)/);
+    const cleanDiscSnippet = tagStop !== -1 ? clauseSnippet.substring(0, tagStop) : clauseSnippet;
+    discSnippet = cleanDiscSnippet.replace(/\s+/g, ' ');
 
-    // Check for tiered discrepancy clause with slab threshold (e.g. UCBL, Bank Asia, Eastern Bank)
-    const tieredDisc = parseTieredFee(clauseSnippet, numericLcAmount);
+    const tieredDisc = parseTieredFee(cleanDiscSnippet, numericLcAmount);
     if (tieredDisc) {
       discAmt = tieredDisc.applicableFee;
-      discStr = tieredDisc.applicableFee.toFixed(2);
     } else {
-      // Find candidate discrepancy fee numbers like USD 30.00, USD 50.00, USD 100.00 (excluding threshold figures)
-      const feeMatches = [...clauseSnippet.matchAll(/(?:USD|EUR|GBP)?\s*(\d{2,3}(?:\.\d{2})?)\b(?!\s*,\s*000|\s*000)/gi)];
-      const candidateFees = feeMatches
-        .map(m => parseFloat(m[1]))
-        .filter(f => f >= 10 && f <= 350);
-
-      if (candidateFees.length > 0) {
-        discAmt = Math.max(...candidateFees);
-        discStr = discAmt.toFixed(2);
-      }
+      // Require explicit currency or fee indicator (never bare numbers or SWIFT tags like :78:)
+      const feeMatches = [
+        ...cleanDiscSnippet.matchAll(/(?:(?:USD|EUR|GBP)\s*(\d{2,3}(?:\.\d{2})?)|(?:AT|OF|COST|FEE|CHARGE)\s+(?:USD|EUR|GBP)?\s*(\d{2,3}(?:\.\d{2})?))\b(?!\s*,\s*000|\s*000)/gi)
+      ];
+      const candidateFees = feeMatches.map(m => parseFloat(m[1] || m[2])).filter(f => f >= 10 && f <= 350);
+      if (candidateFees.length > 0) discAmt = Math.max(...candidateFees);
     }
 
-    // Check if discrepancy fee is explicitly on applicant's / buyer's account:
-    // e.g. "DISCREPANCY CHARGES USD 100.00 WILL BE DEDUCTED FROM APPLICANT'S ACCOUNT"
-    const upperSnippet = clauseSnippet.toUpperCase().replace(/\s+/g, ' ');
-    const isDiscOnApplicant =
-      upperSnippet.includes("APPLICANT'S ACCOUNT") ||
-      upperSnippet.includes("APPLICANTS ACCOUNT") ||
-      upperSnippet.includes("APPLICANT ACCOUNT") ||
-      upperSnippet.includes("FOR APPLICANT") ||
-      upperSnippet.includes("FROM APPLICANT") ||
-      upperSnippet.includes("BORNE BY APPLICANT") ||
-      upperSnippet.includes("BUYER'S ACCOUNT") ||
-      upperSnippet.includes("BUYERS ACCOUNT") ||
-      upperSnippet.includes("BUYER ACCOUNT");
-
-    // Flag ONLY if discrepancy charge > 25.00 AND NOT paid by applicant
-    if (discAmt > 25 && !isDiscOnApplicant) {
-      issues.push({
-        id: 'issue_excessive_discrepancy_fee',
-        correctionId: 'discrepancy_charges',
-        title: `Excessive Discrepancy Fee (USD ${discStr})`,
-        severity: 'warning',
-        reason: `The discrepancy fee in the LC is USD ${discStr}, which exceeds the standard acceptable limit of USD 25.00.`,
-        detectedText: extractSnippet(normalizedText, /DISCREPANCY\s+(?:FEE|CHARGE)[^\n.]{0,100}/i) || `Discrepancy fee: USD ${discStr}`,
-        suggestedDetails: {
-          discrepancyChargeInLc: discStr,
-          acceptableDiscrepancyCharge: '25.00',
-          maxChargeAmount: '25.00'
-        }
-      });
-    }
-  } else {
-    // No discrepancy fee clause found at all in LC -> Request standard discrepancy clause capped at USD 25.00
-    issues.push({
-      id: 'issue_missing_discrepancy_clause',
-      correctionId: 'discrepancy_charges',
-      title: 'Missing Discrepancy Fee Clause (Uncapped Risk)',
-      severity: 'info',
-      reason: 'No discrepancy handling fee clause is defined in the LC. It is recommended to specify that discrepancy charges, if any, shall not exceed USD 25.00.',
-      suggestedDetails: {
-        maxChargeAmount: '25.00',
-        acceptableDiscrepancyCharge: '25.00'
-      }
-    });
+    // Isolate the discrepancy sentence up to the period (ignoring decimal points like 100.00)
+    const discSentenceMatch = cleanDiscSnippet.match(/^[\s\S]*?(?:\.(?!\d)|\n|$)/);
+    const upperDiscSentence = (discSentenceMatch ? discSentenceMatch[0] : cleanDiscSnippet).toUpperCase().replace(/\s+/g, ' ');
+    isDiscOnApplicant =
+      (upperDiscSentence.includes("APPLICANT'S ACCOUNT") ||
+       upperDiscSentence.includes("APPLICANTS ACCOUNT") ||
+       upperDiscSentence.includes("APPLICANT ACCOUNT") ||
+       upperDiscSentence.includes("FOR APPLICANT") ||
+       upperDiscSentence.includes("FROM APPLICANT") ||
+       upperDiscSentence.includes("BORNE BY APPLICANT") ||
+       upperDiscSentence.includes("BUYER'S ACCOUNT") ||
+       upperDiscSentence.includes("BUYERS ACCOUNT") ||
+       upperDiscSentence.includes("BUYER ACCOUNT")) &&
+      !upperDiscSentence.includes("BENEFICIARY");
   }
 
   // 2. PAYMENT / REIMBURSEMENT / SETTLEMENT / FUND TRANSFER / RTGS CHARGES AUDIT:
-  //    - These fees can be in Field 47A, 71D, 78, etc.
-  //    - e.g. "AN AMOUNT OF USD 50.00 AS DOCUMENT SETTLEMENT WILL BE DEDUCTED"
-  //    - Total of these charges cannot exceed USD 25.00.
-  //    - If fee > USD 25.00 but paid by APPLICANT/BUYER, do NOT flag.
-  //    - If slab exists, evaluate based on LC amount.
-  //    - If NONE of these charges exist in LC, flag to request clear limit so bank cannot arbitrarily deduct.
   const paymentFeeRegex = /(?:PAYMENT|REIMBURSEMENT|SETTLEMENT|DOCUMENT\s*SETTLEMENT|FUND\s*TRANSFER|RTGS)/i;
   const hasAnyPaymentFeeMention = paymentFeeRegex.test(normalizedText) ||
                                   /DEDUCT\s+(?:PAYMENT|SETTLEMENT|REIMBURSEMENT)\s+CHARGE/i.test(normalizedText);
 
   let totalPaymentFeeBeneficiary = 0;
-  const detectedPaymentFees: Array<{ type: string; amount: number; text: string }> = [];
+  let totalPaymentFeeApplicant = 0;
+  const detectedPaymentFees: Array<{ type: string; amount: number; payer: string; text: string }> = [];
 
   if (hasAnyPaymentFeeMention) {
-    // Extract candidate snippets around payment/settlement charges (multi-line supported)
-    const paymentSnippets: string[] = [];
     const paymentRegexGlobal = /(?:(?:(?:AN\s+AMOUNT\s+OF\s+)?(?:USD|EUR|GBP)?\s*[\d.]+\s+AS\s+(?:DOCUMENT\s+)?SETTLEMENT[\s\S]*?(?:\.(?!\d)\s*(?=[A-Z0-9:\n])|(?=:[0-9]{2}[A-Z]?:|F[0-9]{2}[A-Z]?:)|\n\s*\.|\n\s*[0-9]{2}\.|$))|(?:(?:WE\s+(?:WILL|SHALL)\s+DEDUCT\s+)?(?:PAYMENT|REIMBURSEMENT|SETTLEMENT|DOCUMENT\s*SETTLEMENT|FUND\s*TRANSFER|RTGS)\s*(?:PROCESSING\s*)?(?:CHARGE|COMMISSION|FEE|COST)?[S]?[\s\S]*?(?:\.(?!\d)\s*(?=[A-Z:\n])|(?=:[0-9]{2}[A-Z]?:|F[0-9]{2}[A-Z]?:)|\n\s*\.|\n\s*[0-9]{2}\.|$)))/gi;
     let pMatch;
     while ((pMatch = paymentRegexGlobal.exec(normalizedText)) !== null) {
-      paymentSnippets.push(pMatch[0].trim());
-    }
-
-    let isBorneByApplicant = false;
-
-    for (const snippet of paymentSnippets) {
+      const snippet = pMatch[0].trim();
       const upperSnippet = snippet.toUpperCase();
-      // Check if this specific charge is explicitly for applicant's account
-      if (
+
+      const isBorneByApplicant =
         (upperSnippet.includes("APPLICANT'S ACCOUNT") ||
          upperSnippet.includes("FOR APPLICANT ACCOUNT") ||
          upperSnippet.includes("FOR ACCOUNT OF APPLICANT") ||
          upperSnippet.includes("BORNE BY APPLICANT") ||
          upperSnippet.includes("BUYER'S ACCOUNT")) &&
-        !upperSnippet.includes("BENEFICIARY")
-      ) {
-        isBorneByApplicant = true;
-        continue;
-      }
+        !upperSnippet.includes("BENEFICIARY");
 
-      // Check tiered slab in payment snippet
-      const tieredPayment = parseTieredFee(snippet, numericLcAmount);
-      if (tieredPayment) {
-        totalPaymentFeeBeneficiary += tieredPayment.applicableFee;
-        detectedPaymentFees.push({ type: 'Tiered Payment Charge', amount: tieredPayment.applicableFee, text: snippet.replace(/\s+/g, ' ') });
-        continue;
-      }
+      const tiered = parseTieredFee(snippet, numericLcAmount);
+      let feeVal = 0;
+      let feeType = 'Payment / Settlement Charge';
 
-      // Check "AN AMOUNT OF USD 50.00 AS DOCUMENT SETTLEMENT"
-      const docSettleMatch = snippet.match(/(?:AN\s+AMOUNT\s+OF\s+)?(?:USD|EUR|GBP)?\s*(\d+(?:\.\d{2})?)\s+AS\s+(?:DOCUMENT\s+)?SETTLEMENT/i);
-      if (docSettleMatch) {
-        const fee = parseFloat(docSettleMatch[1]);
-        if (fee > 0 && !detectedPaymentFees.some(f => f.amount === fee && f.type.includes('Settlement'))) {
-          totalPaymentFeeBeneficiary += fee;
-          detectedPaymentFees.push({ type: 'Document Settlement Charge', amount: fee, text: snippet.replace(/\s+/g, ' ') });
-          continue;
+      if (tiered) {
+        feeVal = tiered.applicableFee;
+        feeType = 'Tiered Payment Charge';
+      } else {
+        const docSettleMatch = snippet.match(/(?:AN\s+AMOUNT\s+OF\s+)?(?:USD|EUR|GBP)?\s*(\d+(?:\.\d{2})?)\s+AS\s+(?:DOCUMENT\s+)?SETTLEMENT/i);
+        if (docSettleMatch) {
+          feeVal = parseFloat(docSettleMatch[1]);
+          feeType = 'Document Settlement Charge';
+        } else {
+          const amtM = snippet.match(/(?:USD|EUR|GBP)?\s*(\d+(?:\.\d{2})?)/i);
+          if (amtM) feeVal = parseFloat(amtM[1]);
         }
       }
 
-      // Individual fee amount
-      const amountMatch = snippet.match(/(?:USD|EUR|GBP)?\s*(\d+(?:\.\d{2})?)/i);
-      if (amountMatch) {
-        const fee = parseFloat(amountMatch[1]);
-        if (fee > 0 && fee <= 300 && !detectedPaymentFees.some(f => f.amount === fee)) {
-          totalPaymentFeeBeneficiary += fee;
-          detectedPaymentFees.push({ type: 'Payment Charge', amount: fee, text: snippet.replace(/\s+/g, ' ') });
+      if (feeVal > 0 && feeVal <= 300) {
+        if (isBorneByApplicant) {
+          totalPaymentFeeApplicant += feeVal;
+          detectedPaymentFees.push({ type: feeType, amount: feeVal, payer: 'Applicant', text: snippet.replace(/\s+/g, ' ') });
+        } else {
+          totalPaymentFeeBeneficiary += feeVal;
+          detectedPaymentFees.push({ type: feeType, amount: feeVal, payer: 'Beneficiary', text: snippet.replace(/\s+/g, ' ') });
         }
       }
     }
 
-    // Also check Field 78 direct payment deduction statement e.g. "LESS USD 30.00 AS PAYMENT CHARGE" or "DEDUCT PAYMENT CHARGE USD 30"
+    // Field 78 direct payment deduction
     const f78DeductMatch = normalizedText.match(/(?:(?:DEDUCT|LESS)\s+(?:PAYMENT|SETTLEMENT|REIMBURSEMENT)\s+CHARGE\s+(?:USD)?\s*(\d+(?:\.\d{2})?)|(?:DEDUCT|LESS)\s+(?:USD|EUR|GBP)?\s*(\d+(?:\.\d{2})?)\s+(?:AS\s+)?(?:PAYMENT|SETTLEMENT|REIMBURSEMENT)\s+CHARGE)/i);
     if (f78DeductMatch) {
       const feeVal = parseFloat(f78DeductMatch[1] || f78DeductMatch[2]);
       if (feeVal > 0 && !detectedPaymentFees.some(f => f.amount === feeVal)) {
         totalPaymentFeeBeneficiary += feeVal;
-        detectedPaymentFees.push({ type: 'Field 78 Payment Deduction', amount: feeVal, text: f78DeductMatch[0] });
+        detectedPaymentFees.push({ type: 'Field 78 Payment Deduction', amount: feeVal, payer: 'Beneficiary', text: f78DeductMatch[0] });
       }
     }
-
-    // If total fees on beneficiary exceed USD 25.00 (and not borne by applicant)
-    if (totalPaymentFeeBeneficiary > 25 && !isBorneByApplicant) {
-      const feesBreakdown = detectedPaymentFees.map(f => `USD ${f.amount.toFixed(2)}`).join(' + ');
-      issues.push({
-        id: 'issue_payment_charges_limit_exceeded',
-        correctionId: 'payment_processing_charges',
-        title: `Payment / Settlement Charges Exceed USD 25.00 (Total: USD ${totalPaymentFeeBeneficiary.toFixed(2)})`,
-        severity: 'warning',
-        reason: `Payment/settlement/reimbursement charges in the LC total USD ${totalPaymentFeeBeneficiary.toFixed(2)} (${feesBreakdown}), which exceeds the allowable limit of USD 25.00. These charges must be capped at USD 25.00 in total or borne by the applicant.`,
-        detectedText: detectedPaymentFees[0]?.text || `Total charges: USD ${totalPaymentFeeBeneficiary.toFixed(2)}`,
-        suggestedDetails: {
-          paymentChargeInLc: totalPaymentFeeBeneficiary.toFixed(2),
-          acceptablePaymentCharge: '25.00',
-          maxChargeAmount: '25.00'
-        }
-      });
-    }
-  } else {
-    // If no Payment / Fund Transfer / Settlement charge clause exists at all, request a ceiling clause
-    issues.push({
-      id: 'issue_missing_payment_charge_clause',
-      correctionId: 'total_bank_charges_limit',
-      title: 'Missing Payment / Bank Charge Ceiling Clause',
-      severity: 'info',
-      reason: 'The LC does not define specific caps for payment, settlement, or fund transfer charges. To prevent unexpected banking deductions at maturity, specify an overall charge ceiling of USD 25.00.',
-      suggestedDetails: {
-        maxChargeAmount: '25.00'
-      }
-    });
   }
 
-  // 3. CABLE / SWIFT / TELEX CHARGES & CUMULATIVE CHARGES AUDIT:
-  //    - Extract Cable / SWIFT charge e.g. "RELATED CABLE COST USD 20.00"
-  //    - Flag if combined total bank charges (Discrepancy + Payment/Settlement + Cable/SWIFT) exceed USD 100.00
+  // 3. CABLE / SWIFT / TELEX CHARGES AUDIT:
   const cableMatches = [...normalizedText.matchAll(/(?:CABLE\s*(?:COST|CHARGE|FEE)|SWIFT\s*(?:COST|CHARGE|FEE)|TELEX\s*(?:COST|CHARGE|FEE))\s*(?:USD|EUR|GBP)?\s*(\d+(?:\.\d{2})?)/gi)];
   let cableSwiftTotal = 0;
   for (const cm of cableMatches) {
@@ -397,22 +317,155 @@ export function auditLcText(text: string, settings?: UserSettings): LcAuditResul
     }
   }
 
-  const totalCumulativeCharges = (discAmt || 0) + (totalPaymentFeeBeneficiary || 0) + cableSwiftTotal;
-  if (totalCumulativeCharges > 100) {
-    const breakdownParts: string[] = [];
-    if (discAmt > 0) breakdownParts.push(`Discrepancy: USD ${discAmt.toFixed(2)}`);
-    if (totalPaymentFeeBeneficiary > 0) breakdownParts.push(`Payment/Settlement: USD ${totalPaymentFeeBeneficiary.toFixed(2)}`);
-    if (cableSwiftTotal > 0) breakdownParts.push(`Cable/SWIFT: USD ${cableSwiftTotal.toFixed(2)}`);
+  // Payer Breakdown for UI Display
+  const discPayerStr = hasDiscrepancyMention
+    ? `Discrepancy Fee: USD ${discAmt.toFixed(2)} (${isDiscOnApplicant ? "Applicant's Account" : "Beneficiary's Account"})`
+    : `Discrepancy Fee: None in LC`;
 
+  const payPayerStr = hasAnyPaymentFeeMention
+    ? (totalPaymentFeeBeneficiary > 0
+        ? `Payment Charges: USD ${totalPaymentFeeBeneficiary.toFixed(2)} (Beneficiary's Account)`
+        : `Payment Charges: USD ${totalPaymentFeeApplicant.toFixed(2)} (Applicant's Account)`)
+    : `Payment Charges: None in LC`;
+
+  const cableStr = cableSwiftTotal > 0 ? ` | Cable/SWIFT: USD ${cableSwiftTotal.toFixed(2)} (Beneficiary's Account)` : '';
+  const breakdownFull = `${discPayerStr} | ${payPayerStr}${cableStr}`;
+
+  // 4. COMBINED CHARGE RULES EVALUATION
+  const discOnBeneficiary = (!isDiscOnApplicant && hasDiscrepancyMention) ? discAmt : 0;
+  const payOnBeneficiary = totalPaymentFeeBeneficiary;
+  const totalBeneficiaryCharges = discOnBeneficiary + payOnBeneficiary + cableSwiftTotal;
+
+  // Case A: Neither Discrepancy nor Payment charge is in the LC -> Ask for unified clause
+  if (!hasDiscrepancyMention && !hasAnyPaymentFeeMention) {
     issues.push({
-      id: 'issue_cumulative_bank_charges_exceeded',
-      correctionId: 'total_bank_charges_limit',
-      title: `Total Combined Bank Charges Exceed USD 100.00 (Total: USD ${totalCumulativeCharges.toFixed(2)})`,
-      severity: 'warning',
-      reason: `The cumulative bank deductions in this LC total USD ${totalCumulativeCharges.toFixed(2)} (${breakdownParts.join(' + ')}), which exceeds the allowable threshold of USD 100.00. Heavy cumulative bank charges substantially reduce export revenue. Please cap all bank deductions at USD 25.00 in total.`,
-      detectedText: `Total bank charges: USD ${totalCumulativeCharges.toFixed(2)} (${breakdownParts.join(', ')})`,
+      id: 'issue_missing_discrepancy_payment_clauses',
+      correctionId: 'discrepancy_payment_charges_revision',
+      title: 'Missing Discrepancy & Payment Charge Clauses',
+      severity: 'info',
+      reason: 'No clauses are defined in the LC regarding discrepancy handling fees or payment/settlement charges. Please add standard clauses capping discrepancy at max USD 25.00 and payment at max USD 25.00, not exceeding USD 50.00 in total.',
+      detectedText: 'No discrepancy or payment charge clause found in LC conditions',
+      suggestedDetails: {
+        discrepancyChargeInLc: 'Missing',
+        paymentChargeInLc: 'Missing',
+        acceptableDiscrepancyCharge: '25.00',
+        acceptablePaymentCharge: '25.00'
+      }
+    });
+  }
+  // Case B: Both Discrepancy and Payment charges are present in LC
+  else if (hasDiscrepancyMention && hasAnyPaymentFeeMention) {
+    const discNeedsRevision = discOnBeneficiary > 25;
+    const payNeedsRevision = payOnBeneficiary > 25;
+    const combinedNeedsRevision = totalBeneficiaryCharges > 50;
+
+    // If both need revision OR combined total exceeds $50.00
+    if ((discNeedsRevision && payNeedsRevision) || (combinedNeedsRevision && (discOnBeneficiary > 0 && payOnBeneficiary > 0))) {
+      issues.push({
+        id: 'issue_combined_charges_revision',
+        correctionId: 'discrepancy_payment_charges_revision',
+        title: 'Revise Discrepancy & Payment Charges (Combined Exceeds Limits)',
+        severity: 'warning',
+        reason: `Bank charges placed on beneficiary exceed acceptable limits: ${breakdownFull}. Total beneficiary deductions USD ${totalBeneficiaryCharges.toFixed(2)} exceed the ceiling of USD 50.00. Discrepancy must be max USD 25.00, payment max USD 25.00, and combined total max USD 50.00.`,
+        detectedText: breakdownFull,
+        suggestedDetails: {
+          discrepancyChargeInLc: discAmt.toFixed(2),
+          paymentChargeInLc: totalPaymentFeeBeneficiary.toFixed(2),
+          acceptableDiscrepancyCharge: '25.00',
+          acceptablePaymentCharge: '25.00',
+          additionalNote: cableSwiftTotal > 0 ? `Cable/SWIFT charge USD ${cableSwiftTotal.toFixed(2)}` : ''
+        }
+      });
+    } else if (discNeedsRevision && !payNeedsRevision) {
+      // Only discrepancy exceeds $25 on beneficiary
+      issues.push({
+        id: 'issue_excessive_discrepancy_fee',
+        correctionId: 'discrepancy_charges',
+        title: `Excessive Discrepancy Fee (USD ${discAmt.toFixed(2)})`,
+        severity: 'warning',
+        reason: `The discrepancy fee in the LC is USD ${discAmt.toFixed(2)} (${isDiscOnApplicant ? "Applicant's Account" : "Beneficiary's Account"}), which exceeds the standard acceptable limit of USD 25.00.`,
+        detectedText: discSnippet,
+        suggestedDetails: {
+          discrepancyChargeInLc: discAmt.toFixed(2),
+          acceptableDiscrepancyCharge: '25.00',
+          maxChargeAmount: '25.00'
+        }
+      });
+    } else if (!discNeedsRevision && payNeedsRevision) {
+      // Only payment exceeds $25 on beneficiary
+      const feesBreakdown = detectedPaymentFees.filter(f => f.payer === 'Beneficiary').map(f => `USD ${f.amount.toFixed(2)}`).join(' + ');
+      issues.push({
+        id: 'issue_payment_charges_limit_exceeded',
+        correctionId: 'payment_processing_charges',
+        title: `Payment / Settlement Charges Exceed USD 25.00 (Total: USD ${totalPaymentFeeBeneficiary.toFixed(2)})`,
+        severity: 'warning',
+        reason: `Payment/settlement charges in the LC total USD ${totalPaymentFeeBeneficiary.toFixed(2)} (${feesBreakdown}) on beneficiary account, which exceeds the allowable limit of USD 25.00.`,
+        detectedText: payPayerStr,
+        suggestedDetails: {
+          paymentChargeInLc: totalPaymentFeeBeneficiary.toFixed(2),
+          acceptablePaymentCharge: '25.00',
+          maxChargeAmount: '25.00'
+        }
+      });
+    }
+  }
+  // Case C: Only Discrepancy is present, Payment is missing
+  else if (hasDiscrepancyMention && !hasAnyPaymentFeeMention) {
+    if (discOnBeneficiary > 25) {
+      issues.push({
+        id: 'issue_excessive_discrepancy_fee',
+        correctionId: 'discrepancy_charges',
+        title: `Excessive Discrepancy Fee (USD ${discAmt.toFixed(2)})`,
+        severity: 'warning',
+        reason: `The discrepancy fee in the LC is USD ${discAmt.toFixed(2)} (${isDiscOnApplicant ? "Applicant's Account" : "Beneficiary's Account"}), which exceeds the standard acceptable limit of USD 25.00.`,
+        detectedText: discSnippet,
+        suggestedDetails: {
+          discrepancyChargeInLc: discAmt.toFixed(2),
+          acceptableDiscrepancyCharge: '25.00',
+          maxChargeAmount: '25.00'
+        }
+      });
+    }
+    issues.push({
+      id: 'issue_missing_payment_charge_clause',
+      correctionId: 'payment_processing_charges',
+      title: 'Missing Payment / Settlement Charge Clause',
+      severity: 'info',
+      reason: 'The LC contains a discrepancy fee clause, but does not define any cap for payment/settlement charges. Please specify that payment processing charges shall not exceed USD 25.00.',
+      detectedText: 'No payment processing or settlement fee clause found in LC',
       suggestedDetails: {
         maxChargeAmount: '25.00'
+      }
+    });
+  }
+  // Case D: Only Payment is present, Discrepancy is missing
+  else if (!hasDiscrepancyMention && hasAnyPaymentFeeMention) {
+    if (payOnBeneficiary > 25) {
+      const feesBreakdown = detectedPaymentFees.filter(f => f.payer === 'Beneficiary').map(f => `USD ${f.amount.toFixed(2)}`).join(' + ');
+      issues.push({
+        id: 'issue_payment_charges_limit_exceeded',
+        correctionId: 'payment_processing_charges',
+        title: `Payment / Settlement Charges Exceed USD 25.00 (Total: USD ${totalPaymentFeeBeneficiary.toFixed(2)})`,
+        severity: 'warning',
+        reason: `Payment/settlement charges in the LC total USD ${totalPaymentFeeBeneficiary.toFixed(2)} (${feesBreakdown}) on beneficiary account, which exceeds the allowable limit of USD 25.00.`,
+        detectedText: payPayerStr,
+        suggestedDetails: {
+          paymentChargeInLc: totalPaymentFeeBeneficiary.toFixed(2),
+          acceptablePaymentCharge: '25.00',
+          maxChargeAmount: '25.00'
+        }
+      });
+    }
+    issues.push({
+      id: 'issue_missing_discrepancy_clause',
+      correctionId: 'discrepancy_charges',
+      title: 'Missing Discrepancy Fee Clause (Uncapped Risk)',
+      severity: 'info',
+      reason: 'The LC contains a payment charge clause, but does not specify any cap for discrepancy fees. Please specify that discrepancy charges, if any, shall not exceed USD 25.00.',
+      detectedText: 'No discrepancy handling fee clause found in LC conditions',
+      suggestedDetails: {
+        maxChargeAmount: '25.00',
+        acceptableDiscrepancyCharge: '25.00'
       }
     });
   }
@@ -618,7 +671,7 @@ export function auditLcText(text: string, settings?: UserSettings): LcAuditResul
   if (
     chargesBlock &&
     (chargesBlock.includes('DISCREPANCY') || chargesBlock.includes('PAYMENT CHARGE')) &&
-    !discStr && !hasAnyPaymentFeeMention
+    discAmt === 0 && totalPaymentFeeBeneficiary === 0
   ) {
     const unspecSnippet = extractSnippet(normalizedText, /(?:INCLUDING|AND)[\s\S]{0,80}(?:PAYMENT|DISCREPANCY)[\s\S]{0,80}BENEFICIARY/i) ||
                           extractSnippet(normalizedText, /:71D:[\s\S]{0,120}/i);
