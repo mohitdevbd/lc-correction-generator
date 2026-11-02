@@ -944,19 +944,32 @@ export function auditLcText(text: string, settings?: UserSettings): LcAuditResul
   // ==========================================
   // Checks strictly whether a payment clause / instruction exists in the LC (e.g. remittance at maturity, RTGS, payment against compliant docs).
   // Note: Tenor is completely separate (Field 42C tenor is checked under Rule 7C).
-  const hasPaymentTerms = upper.includes('EFFECT PAYMENT') ||
-                          upper.includes('MAKE PAYMENT') ||
-                          upper.includes('PAYMENT AT MATURITY') ||
-                          upper.includes('PAYMENT ON MATURITY') ||
-                          upper.includes('PAYMENT IN USD') ||
-                          upper.includes('REMIT PROCEEDS') ||
-                          upper.includes('REMIT THE PROCEEDS') ||
-                          upper.includes('PAYMENT WILL BE MADE') ||
-                          upper.includes('PAYMENT THROUGH RTGS') ||
-                          upper.includes('PAYMENT AGAINST COMPLIANT') ||
-                          upper.includes('PAYMENT AGAINST DOCUMENTS') ||
-                          (upper.includes('F78:') && upper.includes('PAYMENT')) ||
-                          (upper.includes(':78:') && upper.includes('PAYMENT'));
+
+  // 1. Check Field 78 tag presence and content
+  const f78BlockMatch = normalizedText.match(/(?::78:|F78:|(?:^|\n|\s+)78\s*:|INSTRUCTION\s+TO\s+(?:THE\s+)?(?:PAYING|ACCEPTING|NEGO))[\s\S]*?(?=(?:\n:[0-9]{2}|\s+:[0-9]{2}:|\nF[0-9]{2}|\n\s*72[A-Z]?\s*:|$))/i);
+  const f78HasPayment = f78BlockMatch ? /(?:PAYMENT|PAY\b|REMIT|REIMBURS|RTGS|SETTLE|HONOR)/i.test(f78BlockMatch[0]) : false;
+
+  // 2. Check if LC already contains explicit payment fee / deduction clause
+  const hasPaymentFeeClause = hasAnyPaymentFeeMention || detectedPaymentFees.length > 0;
+
+  // 3. Check for payment terms anywhere in the LC
+  const hasPaymentPhrases =
+    /PAYMENT[\s\S]{0,60}WILL\s+BE\s+MADE/i.test(normalizedText) ||
+    /(?:WE\s+)?(?:SHALL|WILL)\s+(?:EFFECT|MAKE)\s+PAYMENT/i.test(normalizedText) ||
+    /EFFECT(?:ING)?\s+PAYMENT/i.test(normalizedText) ||
+    /PAYMENT\s+(?:AT|ON)\s+MATURITY/i.test(normalizedText) ||
+    /PAYMENT[\s\S]{0,40}AT\s+SIGHT/i.test(normalizedText) ||
+    /(?:THROUGH|VIA|BY)\s+RTGS/i.test(normalizedText) ||
+    /(?:REMIT|REMITTING|REMITTANCE)\s+(?:THE\s+)?(?:PROCEEDS|FUNDS)/i.test(normalizedText) ||
+    /REIMBURSEMENT\s+CLAIM/i.test(normalizedText) ||
+    /REIMBURSE\s+(?:OURSELVES|YOU)/i.test(normalizedText) ||
+    /PAYMENT\s+AGAINST\s+(?:COMPLYING|COMPLIANT|DOCUMENTS)/i.test(normalizedText) ||
+    /UPON\s+RECEIPT\s+OF\s+COMPLYING\s+DOCUMENTS/i.test(normalizedText) ||
+    /(?:WE\s+)?(?:SHALL|WILL)\s+(?:REMIT|SETTLE|CREDIT)/i.test(normalizedText) ||
+    /(?:SETTLEMENT|PAYMENT)\s+OF\s+(?:DOCUMENTS|BILLS|DRAFTS)/i.test(normalizedText) ||
+    /AT\s+THE\s+TIME\s+OF\s+PAYMENT/i.test(normalizedText);
+
+  const hasPaymentTerms = f78HasPayment || hasPaymentFeeClause || hasPaymentPhrases;
 
   if (!hasPaymentTerms) {
     issues.push({
