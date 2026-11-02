@@ -131,7 +131,12 @@ export class DraftGeneratorService {
 
     // Default: Single LC mode
     const cleanLc = lcNumber.trim() || '[LC NUMBER]';
-    const activeTemplates = selectedCorrectionIds
+    // Deduplicate individual charge templates if unified revision is selected
+    const effectiveIds = selectedCorrectionIds.includes('discrepancy_payment_charges_revision')
+      ? selectedCorrectionIds.filter(id => !['discrepancy_charges', 'payment_processing_charges', 'overall_bank_charges_cap'].includes(id))
+      : selectedCorrectionIds;
+
+    const activeTemplates = effectiveIds
       .map((id) => CORRECTION_TEMPLATES.find((t) => t.id === id))
       .filter((t): t is typeof CORRECTION_TEMPLATES[number] => Boolean(t));
 
@@ -140,10 +145,10 @@ export class DraftGeneratorService {
     }
 
     if (outputType === 'message') {
-      return this.generateSingleMessageDraft(cleanLc, activeTemplates, details, settings, selectedCorrectionIds);
+      return this.generateSingleMessageDraft(cleanLc, activeTemplates, details, settings, effectiveIds);
     }
 
-    return this.generateSingleEmailDraft(cleanLc, activeTemplates, details, settings, selectedCorrectionIds);
+    return this.generateSingleEmailDraft(cleanLc, activeTemplates, details, settings, effectiveIds);
   }
 
   /**
@@ -160,7 +165,11 @@ export class DraftGeneratorService {
     const effectiveLcs = cleanLcs.length > 0 ? cleanLcs : ['[LC 1]', '[LC 2]'];
     const { subjectLabel } = formatLcList(effectiveLcs);
 
-    const activeTemplates = selectedCorrectionIds
+    const effectiveIds = selectedCorrectionIds.includes('discrepancy_payment_charges_revision')
+      ? selectedCorrectionIds.filter(id => !['discrepancy_charges', 'payment_processing_charges', 'overall_bank_charges_cap'].includes(id))
+      : selectedCorrectionIds;
+
+    const activeTemplates = effectiveIds
       .map((id) => CORRECTION_TEMPLATES.find((t) => t.id === id))
       .filter((t): t is typeof CORRECTION_TEMPLATES[number] => Boolean(t));
 

@@ -156,36 +156,38 @@ export const CORRECTION_TEMPLATES: CorrectionTemplate[] = [
       const accDisc = details.acceptableDiscrepancyCharge?.trim() || '25.00';
       const accPay = details.acceptablePaymentCharge?.trim() || '25.00';
 
-      // Case 1: Both Missing in LC -> Request both capped at USD 25 each / max USD 50 combined
-      if (discInLc === 'Missing' && payInLc === 'Missing') {
-        return `Please add the discrepancy and payment charge clauses in the LC as per the agreed terms/PI. The charges, if any, shall not exceed USD ${accDisc} for discrepancy handling and USD ${accPay} for payment processing, and both charges combined must not exceed USD 50.00 in total.`;
-      }
+      const hasSpecificDisc = discInLc && discInLc !== 'Missing' && discInLc !== 'Unspecified';
+      const hasSpecificPay = payInLc && payInLc !== 'Missing' && payInLc !== 'Unspecified';
 
-      // Case 2: Open-ended / Uncapped charges in Field 71D (no specific amount mentioned in LC)
-      if (discInLc === 'Unspecified' || payInLc === 'Unspecified') {
-        return `Please specify and cap the discrepancy and payment charges in Field 71D. Currently, these charges are placed on beneficiary account without any defined limits. The acceptable limits must not exceed USD ${accDisc} for discrepancy handling and USD ${accPay} for payment processing, and both charges combined must not exceed USD 50.00.`;
-      }
-
-      // Case 3: Specific amounts in LC
-      if (discInLc && payInLc) {
+      // Case 1: Both Discrepancy and Payment have specific numeric amounts in LC that exceed limits (e.g. 50.00 & 30.00)
+      if (hasSpecificDisc && hasSpecificPay) {
         const extraNote = details.additionalNote?.trim() ? ` (${details.additionalNote.trim()})` : '';
         return `We request that you revise the discrepancy and payment charge clauses. Your discrepancy charge of USD ${discInLc} and payment charge of USD ${payInLc}${extraNote} are higher than what we can accept. Our acceptable charges are max USD ${accDisc} for discrepancies and max USD ${accPay} for payment, and all bank charges combined must not exceed USD 50.00 in total.`;
       }
 
-      if (discInLc) {
+      // Case 2: Only discrepancy has specific amount
+      if (hasSpecificDisc && !hasSpecificPay) {
         return `We request that you revise the discrepancy charge clause. Your discrepancy charge of USD ${discInLc} is higher than what we can accept. Our acceptable charge is max USD ${accDisc} for discrepancies.`;
       }
 
-      if (payInLc) {
+      // Case 3: Only payment has specific amount
+      if (!hasSpecificDisc && hasSpecificPay) {
         return `We request that you revise the payment charge clause. Your payment charge of USD ${payInLc} is higher than what we can accept. Our acceptable charge is max USD ${accPay} for payment processing.`;
       }
 
-      return `Please clearly cap the discrepancy and payment charges in the LC to not exceed USD ${accDisc} for discrepancies and USD ${accPay} for payment charges, and max USD 50.00 in total.`;
+      // Case 4: Neither has specific clause/amount defined in LC conditions (Missing in LC or Unspecified in Field 71D)
+      return `Please add the discrepancy and payment charge clause in the LC as per the agreed terms/PI. Both charges combined must not exceed USD 50.00 (with discrepancy handling charge max USD ${accDisc} and payment processing charge max USD ${accPay}).`;
     },
     messageTemplate: (details) => {
       const accDisc = details.acceptableDiscrepancyCharge?.trim() || '25.00';
       const accPay = details.acceptablePaymentCharge?.trim() || '25.00';
-      return `Revise charges to acceptable limits: max USD ${accDisc} for discrepancy, max USD ${accPay} for payment, combined total max USD 50.00.`;
+      const hasSpecificDisc = details.discrepancyChargeInLc && details.discrepancyChargeInLc !== 'Missing' && details.discrepancyChargeInLc !== 'Unspecified';
+      const hasSpecificPay = details.paymentChargeInLc && details.paymentChargeInLc !== 'Missing' && details.paymentChargeInLc !== 'Unspecified';
+
+      if (hasSpecificDisc || hasSpecificPay) {
+        return `Revise charges to acceptable limits: max USD ${accDisc} for discrepancy, max USD ${accPay} for payment, combined total max USD 50.00.`;
+      }
+      return `Add Discrepancy & Payment charge clause: max USD ${accDisc} for discrepancy, max USD ${accPay} for payment, combined total max USD 50.00.`;
     }
   },
   {

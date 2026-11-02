@@ -858,10 +858,33 @@ export function auditLcText(text: string, settings?: UserSettings): LcAuditResul
     issues.push({
       id: 'issue_unspecified_charges',
       correctionId: 'discrepancy_payment_charges_revision',
-      title: 'Uncapped Discrepancy & Payment Charges in Field 71D',
+      title: 'Missing Discrepancy & Payment Charge Clauses (Field 71D Uncapped)',
       severity: 'warning',
-      reason: 'Field 71D places Payment & Discrepancy charges on the Beneficiary without defining acceptable limits. They must be capped at standard rates (e.g., USD 25.00 for discrepancy & USD 25.00 for payment).',
+      reason: 'Field 71D mentions payment & discrepancy charges on beneficiary without any defined limits or clauses in the LC conditions. Please add standard clauses capping discrepancy at max USD 25.00 and payment at max USD 25.00, not exceeding USD 50.00 in total.',
       detectedText: unspecSnippet || 'Payment charge and discrepancy charge are on beneficiary account without fixed amount.',
+      chargeBreakdown: {
+        totalBeneficiary: 0,
+        totalApplicant: 0,
+        items: [
+          {
+            type: 'Discrepancy Fee',
+            amount: 0,
+            currency: detectedCurrency || 'USD',
+            payer: 'Beneficiary',
+            clauseSnippet: unspecSnippet,
+            isExceeding: true
+          },
+          {
+            type: 'Payment Charge',
+            amount: 0,
+            currency: detectedCurrency || 'USD',
+            payer: 'Beneficiary',
+            clauseSnippet: unspecSnippet,
+            isExceeding: true
+          }
+        ],
+        summaryText: 'Discrepancy & Payment charges mentioned in Field 71D without defined rate/clause'
+      },
       suggestedDetails: {
         discrepancyChargeInLc: 'Unspecified',
         paymentChargeInLc: 'Unspecified',
