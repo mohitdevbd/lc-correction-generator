@@ -64,8 +64,113 @@ export async function extractTextFromPdf(file: File): Promise<string> {
   return pageTexts.join('\n\n--- PAGE BREAK ---\n\n');
 }
 
-// Helper to parse tiered / slab fee clauses (e.g. UCBL, Bank Asia, Eastern Bank)
+interface SlabTier {
+  fee: number;
+  min: number;
+  max: number;
+  rawText: string;
+}
+
+// Parses multi-bracket slabs (e.g. Roman numerals I, II, III or numbered slabs 1, 2, 3)
+function parseAllSlabTiers(clauseText: string): SlabTier[] {
+  const tiers: SlabTier[] = [];
+  
+  const parts = clauseText
+    .split(/(?=(?:[IVXLCDM]+\)|\b[0-9]{1,2}[\).]))/i)
+    .map(p => p.trim())
+    .filter(p => p.length > 5);
+
+  for (const part of parts) {
+    const norm = part.replace(/\s+/g, ' ');
+
+    const feeMatch = norm.match(/(?:USD|EUR|GBP)?\s*(\d+(?:\.\d{2})?)\s*(?:USD|EUR|GBP)?\s*(?:SHALL\s+BE\s+DEDUCTED|AS\s+(?:DISCREPANCY|PAYMENT|SETTLEMENT)|\(FOR\s+DOCUMENT\s+VALUE|\bFOR\s+BILL\s+VALUE|\bFOR\s+VALUE|\bFOR\s+DOCUMENTS?|\bFOR\s+INVOICE|\bAT\b)/i) ||
+                     norm.match(/(?:(?:USD|EUR|GBP)\s*(\d+(?:\.\d{2})?))/i);
+    if (!feeMatch) continue;
+
+    const fee = parseFloat(feeMatch[1]);
+    if (isNaN(fee) || fee <= 0 || fee > 500) continue;
+
+    const parseNum = (str: string) => {
+      const clean = str.replace(/,/g, '').trim();
+      return parseFloat(clean);
+    };
+
+    let min = 0;
+    let max = Infinity;
+    let matchedRange = false;
+
+    // Case 1: "USD 10,001 TO USD 50,000" or "USD 20,001 TO USD 50,000" or "10,001 - 50,000"
+    const rangeMatch = norm.match(/(?:USD|EUR|GBP)?\s*([\d,]+(?:\.\d{2})?)\s*(?:TO|-|UNTIL)\s*(?:USD|EUR|GBP)?\s*([\d,]+(?:\.\d{2})?)/i);
+    if (rangeMatch && !norm.match(/UP\s*TO/i)) {
+      min = parseNum(rangeMatch[1]);
+      max = parseNum(rangeMatch[2]);
+      matchedRange = true;
+    }
+
+    // Case 2: "UPTO USD 10,000" or "UP TO USD 20,000" or "LESS THAN USD 15,000" or "BELOW USD 10,000"
+    if (!matchedRange) {
+      const upToMatch = norm.match(/(?:UP\s*TO|UPTO|LESS\s+THAN|BELOW|MAXIMUM)\s*(?:USD|EUR|GBP)?\s*([\d,]+(?:\.\d{2})?)/i);
+      if (upToMatch) {
+        min = 0;
+        max = parseNum(upToMatch[1]);
+        matchedRange = true;
+      }
+    }
+
+    // Case 3: "USD 50,001 AND ABOVE" or "USD 100001 TO ABOVE" or "ABOVE USD 50,000" or "EXCEEDING USD 50,000"
+    if (!matchedRange) {
+      const aboveMatch1 = norm.match(/(?:USD|EUR|GBP)?\s*([\d,]+(?:\.\d{2})?)\s*(?:AND\s+ABOVE|TO\s+ABOVE|\bABOVE\b)/i);
+      const aboveMatch2 = norm.match(/(?:ABOVE|EXCEEDING|OVER|GREATER\s+THAN)\s*(?:USD|EUR|GBP)?\s*([\d,]+(?:\.\d{2})?)/i);
+      if (aboveMatch1) {
+        min = parseNum(aboveMatch1[1]);
+        max = Infinity;
+        matchedRange = true;
+      } else if (aboveMatch2) {
+        min = parseNum(aboveMatch2[1]) + 0.01;
+        max = Infinity;
+        matchedRange = true;
+      }
+    }
+
+    if (matchedRange && !isNaN(min) && !isNaN(max)) {
+      tiers.push({ fee, min, max, rawText: norm });
+    }
+  }
+
+  return tiers;
+}
+
+function evaluateSlabFee(tiers: SlabTier[], lcAmount: number): number | null {
+  if (tiers.length === 0) return null;
+  if (lcAmount <= 0) return tiers[0].fee;
+
+  for (const tier of tiers) {
+    if (lcAmount >= tier.min && lcAmount <= tier.max) {
+      return tier.fee;
+    }
+  }
+
+  const highestTier = [...tiers].sort((a, b) => b.min - a.min)[0];
+  if (lcAmount >= highestTier.min) return highestTier.fee;
+
+  return tiers[0].fee;
+}
+
+// Helper to parse tiered / slab fee clauses (e.g. Southeast Bank, UCBL, Bank Asia, Eastern Bank)
 function parseTieredFee(clauseText: string, lcAmount: number): { lowerFee: number; higherFee: number; threshold: number; applicableFee: number } | null {
+  const tiers = parseAllSlabTiers(clauseText);
+  if (tiers.length >= 2) {
+    const fee = evaluateSlabFee(tiers, lcAmount);
+    if (fee !== null) {
+      return {
+        lowerFee: tiers[0].fee,
+        higherFee: tiers[tiers.length - 1].fee,
+        threshold: tiers[0].max,
+        applicableFee: fee
+      };
+    }
+  }
+
   const norm = clauseText.replace(/\s+/g, ' ');
 
   // Pattern A (e.g. UCBL):
@@ -138,9 +243,15 @@ export function auditLcText(text: string, settings?: UserSettings): LcAuditResul
   // Extract currency and amount
   const { currency: detectedCurrency, amount: detectedAmount } = extractAmount(normalizedText);
 
-  // Extract Beneficiary and Applicant
-  const detectedBeneficiary = extractParty(normalizedText, /(?::59:|F59:[^\n]*Beneficiary|BENEFICIARY)[^\n:]*[:#]?\s*\n?([^\n]+(?:\n[^\n]+){1,3})/i);
-  const detectedApplicant = extractParty(normalizedText, /(?::50:|F50:[^\n]*Applicant|APPLICANT)[^\n:]*[:#]?\s*\n?([^\n]+(?:\n[^\n]+){1,3})/i);
+  // Extract Beneficiary and Applicant (bounded before next SWIFT field tag)
+  const detectedBeneficiary = extractParty(
+    normalizedText,
+    /(?::59[A-Z]?:|F59[A-Z]?:[^\n]*Beneficiary|\bBENEFICIARY\s*(?:NAME\s*(?:AND\s*ADDRESS)?)?\s*:)[^\n:]*[:#]?\s*\n?([\s\S]{1,500}?)(?=(?:\n\s*:[0-9]{2}|\n\s*F[0-9]{2}|$))/i
+  );
+  const detectedApplicant = extractParty(
+    normalizedText,
+    /(?::50[A-Z]?:|F50[A-Z]?:[^\n]*Applicant|\bAPPLICANT\s*(?:NAME\s*(?:AND\s*ADDRESS)?)?\s*:)[^\n:]*[:#]?\s*\n?([\s\S]{1,500}?)(?=(?:\n\s*:[0-9]{2}|\n\s*F[0-9]{2}|$))/i
+  );
 
   const issues: LcAuditIssue[] = [];
 
@@ -206,15 +317,25 @@ export function auditLcText(text: string, settings?: UserSettings): LcAuditResul
   let isDiscOnApplicant = false;
   let discSnippet = '';
 
-  const discIndex = normalizedText.search(/DISCREPA/i);
-  if (discIndex !== -1) {
-    hasDiscrepancyMention = true;
-    const clauseSnippet = normalizedText.substring(discIndex, discIndex + 300);
-    // Cut snippet before next SWIFT tag e.g. :48:, :49:, :78:
-    const tagStop = clauseSnippet.search(/(?:\n\s*:[0-9]{2}[A-Z]?:|\n\s*F[0-9]{2}[A-Z]?:|:[0-9]{2}:)/);
-    const cleanDiscSnippet = tagStop !== -1 ? clauseSnippet.substring(0, tagStop) : clauseSnippet;
-    discSnippet = cleanDiscSnippet.replace(/\s+/g, ' ');
+  const discMatch = normalizedText.match(/(?:[0-9]{1,2}\.\s*)?(?:IN\s+CASE\s+OF\s+DISCREPA[A-Z]*|DISCREPA[A-Z]*\s*(?:FEE|CHARGE|COMMISSION|COST|DOCUMENTS?)?)[^\n]*[\s\S]*?(?=(?:\n\s*[0-9]{1,2}\.|\n\s*:[0-9]{2}[A-Z]?:|\n\s*F[0-9]{2}[A-Z]?:|\n\s*ALL CHARGES|$))/i);
+  let cleanDiscSnippet = '';
 
+  if (discMatch) {
+    hasDiscrepancyMention = true;
+    cleanDiscSnippet = discMatch[0].trim();
+    discSnippet = cleanDiscSnippet.replace(/\s+/g, ' ');
+  } else {
+    const discIndex = normalizedText.search(/DISCREPA/i);
+    if (discIndex !== -1) {
+      hasDiscrepancyMention = true;
+      const clauseSnippet = normalizedText.substring(discIndex, discIndex + 400);
+      const tagStop = clauseSnippet.search(/(?:\n\s*:[0-9]{2}[A-Z]?:|\n\s*F[0-9]{2}[A-Z]?:|:[0-9]{2}:|\n\s*[0-9]{1,2}\.)/);
+      cleanDiscSnippet = tagStop !== -1 ? clauseSnippet.substring(0, tagStop) : clauseSnippet;
+      discSnippet = cleanDiscSnippet.replace(/\s+/g, ' ');
+    }
+  }
+
+  if (hasDiscrepancyMention) {
     const tieredDisc = parseTieredFee(cleanDiscSnippet, numericLcAmount);
     if (tieredDisc) {
       discAmt = tieredDisc.applicableFee;
@@ -227,25 +348,27 @@ export function auditLcText(text: string, settings?: UserSettings): LcAuditResul
       if (candidateFees.length > 0) discAmt = Math.max(...candidateFees);
     }
 
-    // Isolate the discrepancy sentence up to the period (ignoring decimal points like 100.00)
-    const discSentenceMatch = cleanDiscSnippet.match(/^[\s\S]*?(?:\.(?!\d)|\n|$)/);
-    const upperDiscSentence = (discSentenceMatch ? discSentenceMatch[0] : cleanDiscSnippet).toUpperCase().replace(/\s+/g, ' ');
+    const upperDiscSnippet = cleanDiscSnippet.toUpperCase().replace(/\s+/g, ' ');
     isDiscOnApplicant =
-      (upperDiscSentence.includes("APPLICANT'S ACCOUNT") ||
-       upperDiscSentence.includes("APPLICANTS ACCOUNT") ||
-       upperDiscSentence.includes("APPLICANT ACCOUNT") ||
-       upperDiscSentence.includes("FOR APPLICANT") ||
-       upperDiscSentence.includes("FROM APPLICANT") ||
-       upperDiscSentence.includes("BORNE BY APPLICANT") ||
-       upperDiscSentence.includes("BUYER'S ACCOUNT") ||
-       upperDiscSentence.includes("BUYERS ACCOUNT") ||
-       upperDiscSentence.includes("BUYER ACCOUNT")) &&
-      !upperDiscSentence.includes("BENEFICIARY");
+      (upperDiscSnippet.includes("APPLICANT'S ACCOUNT") ||
+       upperDiscSnippet.includes("APPLICANTS ACCOUNT") ||
+       upperDiscSnippet.includes("APPLICANT ACCOUNT") ||
+       upperDiscSnippet.includes("FOR APPLICANT") ||
+       upperDiscSnippet.includes("FROM APPLICANT") ||
+       upperDiscSnippet.includes("BORNE BY APPLICANT") ||
+       upperDiscSnippet.includes("BUYER'S ACCOUNT") ||
+       upperDiscSnippet.includes("BUYERS ACCOUNT") ||
+       upperDiscSnippet.includes("BUYER ACCOUNT")) &&
+      !upperDiscSnippet.includes("BENEFICIARY");
   }
 
   // 2. PAYMENT / REIMBURSEMENT / SETTLEMENT / FUND TRANSFER / RTGS CHARGES AUDIT:
-  const paymentFeeRegex = /(?:PAYMENT|REIMBURSEMENT|SETTLEMENT|DOCUMENT\s*SETTLEMENT|FUND\s*TRANSFER|RTGS)/i;
+  const paymentFeeRegex = /(?:PAYMENT|REIMBURSEMENT|SETTLEMENT|DOCUMENT\s*SETTLEMENT|FUND\s*TRANSFER|RTGS)\s*(?:PROCESSING\s*)?(?:CHARGE|COMMISSION|FEE|COST|EXPENSE|OF\s+USD|AT\s+USD)/i;
+  const paymentDeductRegex = /(?:(?:WE\s+)?(?:WILL|SHALL)\s+BE\s+DEDUCTED|WE\s+WILL\s+DEDUCT|DEDUCTED\s+FROM\s+(?:THE\s+)?BILL\s+VALUE)[\s\S]{1,60}?(?:AT\s+THE\s+TIME\s+OF\s+PAYMENT|PAYMENT)/i;
+  const docSettlementRegex = /(?:AN\s+AMOUNT\s+OF\s+)?(?:USD|EUR|GBP)?\s*[\d.]+\s+AS\s+(?:DOCUMENT\s+)?SETTLEMENT/i;
   const hasAnyPaymentFeeMention = paymentFeeRegex.test(normalizedText) ||
+                                  paymentDeductRegex.test(normalizedText) ||
+                                  docSettlementRegex.test(normalizedText) ||
                                   /DEDUCT\s+(?:PAYMENT|SETTLEMENT|REIMBURSEMENT)\s+CHARGE/i.test(normalizedText);
 
   let totalPaymentFeeBeneficiary = 0;
@@ -253,7 +376,7 @@ export function auditLcText(text: string, settings?: UserSettings): LcAuditResul
   const detectedPaymentFees: Array<{ type: string; amount: number; payer: string; text: string }> = [];
 
   if (hasAnyPaymentFeeMention) {
-    const paymentRegexGlobal = /(?:(?:(?:AN\s+AMOUNT\s+OF\s+)?(?:USD|EUR|GBP)?\s*[\d.]+\s+AS\s+(?:DOCUMENT\s+)?SETTLEMENT[\s\S]*?(?:\.(?!\d)\s*(?=[A-Z0-9:\n])|(?=:[0-9]{2}[A-Z]?:|F[0-9]{2}[A-Z]?:)|\n\s*\.|\n\s*[0-9]{2}\.|$))|(?:(?:WE\s+(?:WILL|SHALL)\s+DEDUCT\s+)?(?:PAYMENT|REIMBURSEMENT|SETTLEMENT|DOCUMENT\s*SETTLEMENT|FUND\s*TRANSFER|RTGS)\s*(?:PROCESSING\s*)?(?:CHARGE|COMMISSION|FEE|COST)?[S]?[\s\S]*?(?:\.(?!\d)\s*(?=[A-Z:\n])|(?=:[0-9]{2}[A-Z]?:|F[0-9]{2}[A-Z]?:)|\n\s*\.|\n\s*[0-9]{2}\.|$)))/gi;
+    const paymentRegexGlobal = /(?:(?:[0-9]{1,2}\.\s*)?(?:PAYMENT\s+CHARGE|SETTLEMENT\s+CHARGE|REIMBURSEMENT\s+CHARGE|DOCUMENT\s+SETTLEMENT|FUND\s+TRANSFER\s+CHARGE|RTGS\s+CHARGE|WE\s+(?:WILL|SHALL)\s+DEDUCT[\s\S]{1,60}?(?:AT\s+THE\s+TIME\s+OF\s+PAYMENT|PAYMENT))[\s\S]*?(?=(?:\n\s*[0-9]{1,2}\.|\n\s*:[0-9]{2}[A-Z]?:|\n\s*F[0-9]{2}[A-Z]?:|\n\s*ALL CHARGES|$)))|(?:(?:AN\s+AMOUNT\s+OF\s+)?(?:USD|EUR|GBP)?\s*[\d.]+\s+AS\s+(?:DOCUMENT\s+)?SETTLEMENT[\s\S]*?(?=(?:\n\s*[0-9]{1,2}\.|\n\s*:[0-9]{2}[A-Z]?:|\n\s*F[0-9]{2}[A-Z]?:|\n\s*ALL CHARGES|$)))/gi;
     let pMatch;
     while ((pMatch = paymentRegexGlobal.exec(normalizedText)) !== null) {
       const snippet = pMatch[0].trim();
@@ -809,18 +932,25 @@ export function auditLcText(text: string, settings?: UserSettings): LcAuditResul
   // ==========================================
   // RULE 8: Beneficiary Name Check (Field 59)
   // ==========================================
-  if (settings?.companyName && detectedBeneficiary) {
-    const expected = settings.companyName.trim().toUpperCase();
-    const actual = detectedBeneficiary.toUpperCase();
-    // If not included and diff is noticeable
-    if (!actual.includes(expected.split(' ')[0])) {
+  if (settings?.companyName && settings.companyName.trim() && detectedBeneficiary) {
+    const cleanExpected = settings.companyName.trim().toUpperCase().replace(/[.,\-\/]/g, ' ').replace(/\s+/g, ' ');
+    const cleanActual = detectedBeneficiary.toUpperCase().replace(/[.,\-\/]/g, ' ').replace(/\s+/g, ' ');
+
+    const expectedWords = cleanExpected
+      .split(' ')
+      .filter(w => w.length > 1 && !['LTD', 'LIMITED', 'PLC', 'PVT', 'CORP', 'CORPORATION', 'LLC', 'INC'].includes(w));
+    
+    const isMatch = cleanActual.includes(cleanExpected) ||
+                    (expectedWords.length > 0 && expectedWords.every(w => cleanActual.includes(w)));
+
+    if (!isMatch) {
       issues.push({
         id: 'issue_beneficiary_name',
         correctionId: 'beneficiary_name_correction',
         title: 'Beneficiary Legal Name Discrepancy',
         severity: 'warning',
         reason: `Beneficiary name detected in Field 59 does not seem to match your company profile: "${settings.companyName}".`,
-        detectedText: detectedBeneficiary.split('\n')[0],
+        detectedText: detectedBeneficiary.split(',')[0].trim(),
         suggestedDetails: {
           correctBeneficiaryName: settings.companyName
         }
@@ -914,8 +1044,8 @@ function parseFlexibleDate(dateStr: string): Date | null {
 function extractAmount(text: string): { currency?: string; amount?: string } {
   // Case 1: Look directly around :32B: or F32B:
   // SWIFT MT700 field 32B format: :32B:YYMMDD[CUR][AMOUNT] or :32B: Currency Code, Amount\nUSD20935,
-  // or F32B: Currency: USD Amount: 32219, #32219,#
-  const tag32bMatch = text.match(/(?::32B:|F32B:[^\n]*Currency[^\n]*)[^\n]*\n?([\s\S]{1,120}?(?=\n:[0-9]{2}|\nF[0-9]{2}|$))/i);
+  // or F32B: Currency: USD Amount: 11125,00 #11125,00#
+  const tag32bMatch = text.match(/(?::32B:|F32B:[^\n]*Currency[^\n]*)[^\n]*\n?([\s\S]{1,150}?(?=\n:[0-9]{2}|\nF[0-9]{2}|$))/i);
   if (tag32bMatch) {
     const block = tag32bMatch[1];
     
@@ -925,12 +1055,19 @@ function extractAmount(text: string): { currency?: string; amount?: string } {
       const currency = currMatch[1].toUpperCase();
       // Extract amount following the currency or Amount: keyword
       const afterCurrency = block.substring(currMatch.index! + currMatch[0].length);
-      const amtMatch = afterCurrency.match(/\s*(?:Amount:\s*)?#?([0-9]{1,3}(?:,[0-9]{3})+(?:\.[0-9]{2})?|[0-9]+(?:\.[0-9]{2})?|[0-9]+)/i) ||
-                       block.match(/Amount:\s*#?([0-9]{1,3}(?:,[0-9]{3})+(?:\.[0-9]{2})?|[0-9]+(?:\.[0-9]{2})?|[0-9]+)/i);
+      const amtMatch = afterCurrency.match(/\s*(?:Amount:\s*)?#?([0-9]{1,3}(?:[.,][0-9]{3})*(?:[.,][0-9]{2})|[0-9]+(?:[.,][0-9]{2})|[0-9]+)/i) ||
+                       block.match(/Amount:\s*#?([0-9]{1,3}(?:[.,][0-9]{3})*(?:[.,][0-9]{2})|[0-9]+(?:[.,][0-9]{2})|[0-9]+)/i);
       if (amtMatch) {
+        let rawAmt = amtMatch[1].trim();
+        // Check if comma is used as decimal separator (e.g. 11125,00 or 11.125,00)
+        if (/,\d{2}$/.test(rawAmt) && !rawAmt.includes('.')) {
+          rawAmt = rawAmt.replace(/\./g, '').replace(',', '.');
+        } else {
+          rawAmt = rawAmt.replace(/,/g, '');
+        }
         return {
           currency,
-          amount: amtMatch[1].trim()
+          amount: rawAmt
         };
       }
     }
@@ -941,7 +1078,7 @@ function extractAmount(text: string): { currency?: string; amount?: string } {
   if (inlineMatch) {
     return {
       currency: inlineMatch[1].toUpperCase(),
-      amount: inlineMatch[2].trim()
+      amount: inlineMatch[2].trim().replace(/,/g, '')
     };
   }
 
@@ -950,7 +1087,7 @@ function extractAmount(text: string): { currency?: string; amount?: string } {
   if (matchLabel) {
     return {
       currency: matchLabel[1].toUpperCase(),
-      amount: matchLabel[2].trim()
+      amount: matchLabel[2].trim().replace(/,/g, '')
     };
   }
 
@@ -960,11 +1097,21 @@ function extractAmount(text: string): { currency?: string; amount?: string } {
 function extractParty(text: string, regex: RegExp): string | undefined {
   const match = text.match(regex);
   if (!match) return undefined;
-  return match[1]
+  const raw = match[1];
+  const lines = raw
     .split('\n')
     .map(line => line.trim())
-    .filter(line => line.length > 0 && !line.startsWith(':'))
-    .join(', ');
+    .filter(line => {
+      if (!line) return false;
+      if (/^Page \d+ of \d+/i.test(line)) return false;
+      if (/^Name and Address:?$/i.test(line)) return false;
+      if (/^Identifier Code:?$/i.test(line)) return false;
+      if (/^:[0-9]{2}[A-Z]?:/i.test(line)) return false;
+      if (/^F[0-9]{2}[A-Z]?:/i.test(line)) return false;
+      return true;
+    });
+
+  return lines.length > 0 ? lines.slice(0, 4).join(', ') : undefined;
 }
 
 function extractSnippet(text: string, regex: RegExp): string | undefined {
