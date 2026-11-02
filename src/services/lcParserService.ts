@@ -1,5 +1,5 @@
 import * as pdfjsLib from 'pdfjs-dist';
-import type { LcAuditResult, LcAuditIssue, UserSettings } from '../types';
+import type { LcAuditResult, LcAuditIssue, UserSettings, ChargeBreakdown, ChargePayerItem } from '../types';
 
 // Set up pdf.js worker using web worker URL
 try {
@@ -466,10 +466,52 @@ export function auditLcText(text: string, settings?: UserSettings): LcAuditResul
   const cableStr = cableSwiftTotal > 0 ? ` | Cable/SWIFT: USD ${cableSwiftTotal.toFixed(2)} (Beneficiary's Account)` : '';
   const breakdownFull = `${discPayerStr} | ${payPayerStr}${cableStr}`;
 
-  // 4. COMBINED CHARGE RULES EVALUATION
+  // 4. COMBINED CHARGE RULES EVALUATION & BREAKDOWN OBJECT
   const discOnBeneficiary = (!isDiscOnApplicant && hasDiscrepancyMention) ? discAmt : 0;
   const payOnBeneficiary = totalPaymentFeeBeneficiary;
   const totalBeneficiaryCharges = discOnBeneficiary + payOnBeneficiary + cableSwiftTotal;
+
+  // Construct Charge Breakdown items (who pays what)
+  const breakdownItems: ChargePayerItem[] = [];
+
+  if (hasDiscrepancyMention && discAmt > 0) {
+    breakdownItems.push({
+      type: 'Discrepancy Fee',
+      amount: discAmt,
+      currency: detectedCurrency || 'USD',
+      payer: isDiscOnApplicant ? 'Applicant' : 'Beneficiary',
+      clauseSnippet: discSnippet,
+      isExceeding: !isDiscOnApplicant && discAmt > 25
+    });
+  }
+
+  for (const pf of detectedPaymentFees) {
+    breakdownItems.push({
+      type: pf.type,
+      amount: pf.amount,
+      currency: detectedCurrency || 'USD',
+      payer: pf.payer as 'Beneficiary' | 'Applicant',
+      clauseSnippet: pf.text,
+      isExceeding: pf.payer === 'Beneficiary' && pf.amount > 25
+    });
+  }
+
+  if (cableSwiftTotal > 0) {
+    breakdownItems.push({
+      type: 'Cable / SWIFT Charge',
+      amount: cableSwiftTotal,
+      currency: detectedCurrency || 'USD',
+      payer: 'Beneficiary',
+      isExceeding: cableSwiftTotal > 50
+    });
+  }
+
+  const chargeBreakdown: ChargeBreakdown = {
+    totalBeneficiary: totalBeneficiaryCharges,
+    totalApplicant: (isDiscOnApplicant ? discAmt : 0) + totalPaymentFeeApplicant,
+    items: breakdownItems,
+    summaryText: breakdownFull
+  };
 
   // Case A: Neither Discrepancy nor Payment charge is in the LC -> Ask for unified clause
   if (!hasDiscrepancyMention && !hasAnyPaymentFeeMention) {
@@ -503,6 +545,7 @@ export function auditLcText(text: string, settings?: UserSettings): LcAuditResul
         severity: 'warning',
         reason: `Bank charges placed on beneficiary exceed acceptable limits: ${breakdownFull}. Total beneficiary deductions USD ${totalBeneficiaryCharges.toFixed(2)} exceed the ceiling of USD 50.00. Discrepancy must be max USD 25.00, payment max USD 25.00, and combined total max USD 50.00.`,
         detectedText: breakdownFull,
+        chargeBreakdown,
         suggestedDetails: {
           discrepancyChargeInLc: discAmt.toFixed(2),
           paymentChargeInLc: totalPaymentFeeBeneficiary.toFixed(2),
@@ -519,7 +562,8 @@ export function auditLcText(text: string, settings?: UserSettings): LcAuditResul
         title: `Excessive Discrepancy Fee (USD ${discAmt.toFixed(2)})`,
         severity: 'warning',
         reason: `The discrepancy fee in the LC is USD ${discAmt.toFixed(2)} (${isDiscOnApplicant ? "Applicant's Account" : "Beneficiary's Account"}), which exceeds the standard acceptable limit of USD 25.00.`,
-        detectedText: discSnippet,
+        detectedText: `${discPayerStr} | ${payPayerStr}`,
+        chargeBreakdown,
         suggestedDetails: {
           discrepancyChargeInLc: discAmt.toFixed(2),
           acceptableDiscrepancyCharge: '25.00',
@@ -535,7 +579,8 @@ export function auditLcText(text: string, settings?: UserSettings): LcAuditResul
         title: `Payment / Settlement Charges Exceed USD 25.00 (Total: USD ${totalPaymentFeeBeneficiary.toFixed(2)})`,
         severity: 'warning',
         reason: `Payment/settlement charges in the LC total USD ${totalPaymentFeeBeneficiary.toFixed(2)} (${feesBreakdown}) on beneficiary account, which exceeds the allowable limit of USD 25.00.`,
-        detectedText: payPayerStr,
+        detectedText: `${payPayerStr} | ${discPayerStr}`,
+        chargeBreakdown,
         suggestedDetails: {
           paymentChargeInLc: totalPaymentFeeBeneficiary.toFixed(2),
           acceptablePaymentCharge: '25.00',

@@ -158,6 +158,22 @@ export interface SavedTemplate {
 
 export type AuditSeverity = 'critical' | 'warning' | 'info';
 
+export interface ChargePayerItem {
+  type: string;
+  amount: number;
+  currency?: string;
+  payer: 'Beneficiary' | 'Applicant';
+  clauseSnippet?: string;
+  isExceeding?: boolean;
+}
+
+export interface ChargeBreakdown {
+  totalBeneficiary: number;
+  totalApplicant: number;
+  items: ChargePayerItem[];
+  summaryText: string;
+}
+
 export interface LcAuditIssue {
   id: string;
   correctionId: string;
@@ -166,6 +182,7 @@ export interface LcAuditIssue {
   reason: string;
   detectedText?: string;
   suggestedDetails?: Partial<AdditionalDetails>;
+  chargeBreakdown?: ChargeBreakdown;
 }
 
 export interface LcAuditResult {

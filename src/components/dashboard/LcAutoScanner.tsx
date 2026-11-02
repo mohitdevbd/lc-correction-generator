@@ -12,7 +12,10 @@ import {
   Check,
   ChevronDown,
   ChevronUp,
-  X
+  X,
+  User,
+  Building2,
+  Coins
 } from 'lucide-react';
 import type { LcAuditResult, UserSettings, AdditionalDetails } from '../../types';
 import { extractTextFromPdf, auditLcText } from '../../services/lcParserService';
@@ -24,6 +27,37 @@ interface LcAutoScannerProps {
     selectedIssueIds: string[],
     suggestedDetails: Partial<AdditionalDetails>
   ) => void;
+}
+
+function highlightSnippetText(text: string) {
+  const regex = /(Beneficiary's Account|Beneficiary Account|Applicant's Account|Applicants Account|Buyer's Account|Buyer Account|USD\s*\d+(?:\.\d{2})?)/gi;
+  const parts = text.split(regex);
+
+  return parts.map((part, i) => {
+    const upper = part.toUpperCase();
+    if (upper.includes("BENEFICIARY")) {
+      return (
+        <span key={i} className="inline-block rounded bg-rose-100 px-1 py-0.5 font-bold text-rose-800 border border-rose-200">
+          {part}
+        </span>
+      );
+    }
+    if (upper.includes("APPLICANT") || upper.includes("BUYER")) {
+      return (
+        <span key={i} className="inline-block rounded bg-emerald-100 px-1 py-0.5 font-bold text-emerald-800 border border-emerald-200">
+          {part}
+        </span>
+      );
+    }
+    if (/^USD\s*\d+/i.test(part)) {
+      return (
+        <span key={i} className="font-bold text-indigo-700 bg-indigo-50 px-1 py-0.5 rounded border border-indigo-200">
+          {part}
+        </span>
+      );
+    }
+    return part;
+  });
 }
 
 export const LcAutoScanner: React.FC<LcAutoScannerProps> = ({
@@ -419,10 +453,83 @@ export const LcAutoScanner: React.FC<LcAutoScannerProps> = ({
                               {issue.reason}
                             </p>
 
+                            {/* Charge Breakdown: কে কত চার্জ বহন করবে */}
+                            {issue.chargeBreakdown && issue.chargeBreakdown.items.length > 0 && (
+                              <div className="mt-2.5 rounded-lg border border-slate-200/90 bg-white p-2.5 shadow-2xs space-y-2">
+                                <div className="flex flex-wrap items-center justify-between gap-1.5 border-b border-slate-100 pb-1.5">
+                                  <div className="flex items-center space-x-1.5">
+                                    <Coins className="h-3.5 w-3.5 text-indigo-600" />
+                                    <span className="text-[11px] font-bold text-slate-800 uppercase tracking-wide">
+                                      কে কত চার্জ বহন করবে (Charge Distribution)
+                                    </span>
+                                  </div>
+                                  <div className="flex items-center gap-1.5 text-[11px] font-bold">
+                                    <span className="inline-flex items-center space-x-1 rounded-md bg-rose-50 px-2 py-0.5 text-rose-700 border border-rose-200">
+                                      <User className="h-3 w-3 mr-0.5 text-rose-600" />
+                                      <span>Beneficiary: USD {issue.chargeBreakdown.totalBeneficiary.toFixed(2)}</span>
+                                    </span>
+                                    {issue.chargeBreakdown.totalApplicant > 0 && (
+                                      <span className="inline-flex items-center space-x-1 rounded-md bg-emerald-50 px-2 py-0.5 text-emerald-700 border border-emerald-200">
+                                        <Building2 className="h-3 w-3 mr-0.5 text-emerald-600" />
+                                        <span>Buyer/Applicant: USD {issue.chargeBreakdown.totalApplicant.toFixed(2)}</span>
+                                      </span>
+                                    )}
+                                  </div>
+                                </div>
+
+                                <div className="space-y-1.5">
+                                  {issue.chargeBreakdown.items.map((item, idx) => {
+                                    const isBene = item.payer === 'Beneficiary';
+                                    return (
+                                      <div
+                                        key={idx}
+                                        className={`rounded-md p-2 text-xs border transition-all ${
+                                          isBene
+                                            ? 'bg-rose-50/50 border-rose-200 text-slate-900'
+                                            : 'bg-emerald-50/50 border-emerald-200 text-slate-900'
+                                        }`}
+                                      >
+                                        <div className="flex items-center justify-between">
+                                          <div className="flex items-center space-x-1.5 flex-wrap gap-y-1">
+                                            <span className="font-bold text-slate-900">{item.type}</span>
+                                            <span
+                                              className={`inline-flex items-center rounded px-1.5 py-0.2 text-[10px] font-bold ${
+                                                isBene
+                                                  ? 'bg-rose-100 text-rose-800 border border-rose-200'
+                                                  : 'bg-emerald-100 text-emerald-800 border border-emerald-200'
+                                              }`}
+                                            >
+                                              {isBene ? '👤 Beneficiary বহন করবে' : '🏢 Buyer / Applicant বহন করবে (No Flag)'}
+                                            </span>
+                                            {item.isExceeding && (
+                                              <span className="inline-flex items-center rounded bg-amber-100 px-1.5 py-0.2 text-[10px] font-bold text-amber-900 border border-amber-300">
+                                                ⚠️ সীমা অতিক্রম ($25 Max)
+                                              </span>
+                                            )}
+                                          </div>
+                                          <span className={`font-mono font-bold text-xs shrink-0 ml-2 ${isBene ? 'text-rose-700' : 'text-emerald-700'}`}>
+                                            USD {item.amount.toFixed(2)}
+                                          </span>
+                                        </div>
+                                        {item.clauseSnippet && (
+                                          <p className="mt-1.5 text-[10.5px] font-mono text-slate-600 bg-white/90 p-1.5 rounded border border-slate-200/60 leading-relaxed">
+                                            <span className="font-semibold text-slate-500 font-sans">LC Clause: </span>
+                                            "{item.clauseSnippet}"
+                                          </p>
+                                        )}
+                                      </div>
+                                    );
+                                  })}
+                                </div>
+                              </div>
+                            )}
+
                             {issue.detectedText && (
-                              <div className="rounded-md bg-slate-100 px-2 py-1 text-[11px] font-mono text-slate-700 border border-slate-200/60 mt-1">
-                                <span className="font-semibold text-slate-500">LC Snippet: </span>
-                                "{issue.detectedText}"
+                              <div className="rounded-md bg-slate-50 px-2.5 py-1.5 text-[11px] font-mono text-slate-700 border border-slate-200 mt-2">
+                                <span className="font-semibold text-slate-500 font-sans text-[10px] uppercase tracking-wide mr-1.5">
+                                  LC Snippet:
+                                </span>
+                                {highlightSnippetText(issue.detectedText)}
                               </div>
                             )}
                           </div>
