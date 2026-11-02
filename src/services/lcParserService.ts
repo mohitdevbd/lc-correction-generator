@@ -258,7 +258,7 @@ export function auditLcText(text: string, settings?: UserSettings): LcAuditResul
   // ==========================================
   // RULE 1: Field 71D – Genuinely Problematic Charges on Beneficiary
   // ==========================================
-  const chargesMatch = normalizedText.match(/(?::71D:|:71B:|F71D:[^\n]*Charges)[ \t]*(?:Charges[ \t]*)?[:#]?\s*([\s\S]{1,400}?)(?=(?:\n:[0-9]{2}|\s+:[0-9]{2}:|\nF[0-9]{2}|$))/i);
+  const chargesMatch = normalizedText.match(/(?::71D:|:71B:|F71D:[^\n]*Charges|(?:\b|\n)\s*71D\s*:\s*(?:CHARGES)?)[ \t]*(?:Charges[ \t]*)?[:#]?\s*([\s\S]{1,400}?)(?=(?:\n:[0-9]{2}|\s+:[0-9]{2}:|\nF[0-9]{2}|\n\s*[0-9]{2}[A-Z]?\s*:|\s+[0-9]{2}[A-Z]?\s*:|$))/i);
   const chargesBlock = chargesMatch ? chargesMatch[1].toUpperCase() : '';
 
   if (chargesBlock) {
@@ -318,7 +318,7 @@ export function auditLcText(text: string, settings?: UserSettings): LcAuditResul
   // ==========================================
   // Exclude Field 71D so Tag 71D banking charges are audited completely separately from Tag 47A / conditions
   const textWithout71D = normalizedText.replace(
-    /(?::71D:|:71B:|F71D:[^\n]*Charges)[ \t]*(?:Charges[ \t]*)?[:#]?[\s\S]*?(?=(?:\n:[0-9]{2}|\s+:[0-9]{2}:|\nF[0-9]{2}|$))/i,
+    /(?::71D:|:71B:|F71D:[^\n]*Charges|(?:\b|\n)\s*71D\s*:\s*(?:CHARGES)?)[ \t]*(?:Charges[ \t]*)?[:#]?[\s\S]*?(?=(?:\n:[0-9]{2}|\s+:[0-9]{2}:|\nF[0-9]{2}|\n\s*[0-9]{2}[A-Z]?\s*:|\s+[0-9]{2}[A-Z]?\s*:|$))/i,
     ''
   );
   const numericLcAmount = detectedAmount ? parseFloat(detectedAmount.replace(/,/g, '')) : 0;
@@ -329,11 +329,11 @@ export function auditLcText(text: string, settings?: UserSettings): LcAuditResul
   let isDiscOnApplicant = false;
   let discSnippet = '';
 
-  // Top-level condition boundary: stops before next numbered (e.g. 1. or 10.) or lettered (e.g. A. or G.) condition, or SWIFT tag (:XX:, FXX:), or ALL CHARGES
-  const conditionBoundary = '(?=(?:\\n\\s*(?:[0-9]{1,2}\\.|\\b[A-Z]\\.)|\\n\\s*:[0-9]{2}[A-Z]?:|\\n\\s*F[0-9]{2}[A-Z]?:|\\n\\s*ALL CHARGES|$))';
+  // Top-level condition boundary: stops before next numbered (e.g. 1. or 4) or 10.) or lettered (e.g. A. or G.) condition, or SWIFT tag (:XX:, FXX:, 71D:, 78:), or ALL CHARGES
+  const conditionBoundary = '(?=(?:(?:\\n|\\.|;)\\s*(?:[0-9]{1,2}[\\.\\)]|\\b[A-Z][\\.\\)])\\s+[A-Z]|\\n\\s*:[0-9]{2}[A-Z]?:|\\s+:[0-9]{2}:|\\n\\s*F[0-9]{2}[A-Z]?:|\\n\\s*[0-9]{2}[A-Z]?\\s*:|\\s+[0-9]{2}[A-Z]?\\s*:|\\bALL\\s+(?:BANKING|BANK)?\\s*CHARGES|$))';
 
   const discRegex = new RegExp(
-    `(?:(?:[0-9]{1,2}|[A-Z])[\\.\\)]\\s*)?(?:IN\\s+CASE\\s+OF\\s+DISCREPA[A-Z]*|DISCREPA[A-Z]*\\s*(?:FEE|CHARGE|COMMISSION|COST|DOCUMENTS?)?)[^\\n]*[\\s\\S]*?${conditionBoundary}`,
+    `(?:(?:[0-9]{1,2}|[A-Z])[\\.\\)]\\s*)?(?:IN\\s+CASE\\s+OF\\s+DISCREPA[A-Z]*|DISCREPA[A-Z]*\\s*(?:FEE|CHARGE|COMMISSION|COST|DOCUMENTS?)?)[^\\n]*?[\\s\\S]*?${conditionBoundary}`,
     'i'
   );
   const discMatch = textWithout71D.match(discRegex);
@@ -397,13 +397,15 @@ export function auditLcText(text: string, settings?: UserSettings): LcAuditResul
   if (hasAnyPaymentFeeMention) {
     const paymentRegexGlobal = new RegExp(
       `(?:(?:(?:[0-9]{1,2}|[A-Z])[\\.\\)]\\s*)?(?:PAYMENT|SETTLEMENT|REIMBURSEMENT|DOCUMENT\\s*SETTLEMENT|FUND\\s*TRANSFER|RTGS)\\s*(?:PROCESSING\\s*)?(?:CHARGE|COMMISSION|FEE|COST|EXPENSE)[S]?[\\s\\S]*?${conditionBoundary})` +
-      `|(?:(?:[0-9]{1,2}|[A-Z])[\\.\\)]\\s*)?(?:(?:WE\\s+)?(?:WILL|SHALL)\\s+(?:BE\\s+)?DEDUCT(?:ED)?[\\s\\S]{1,60}?(?:AT\\s+THE\\s+TIME\\s+OF\\s+PAYMENT|PAYMENT))[\\s\\S]*?${conditionBoundary}` +
+      `|(?:(?:[0-9]{1,2}|[A-Z])[\\.\\)]\\s*)?(?:AT\\s+THE\\s+TIME\\s+OF\\s+PAYMENT[\\s\\S]{1,60}?(?:WE\\s+)?(?:WILL|SHALL)\\s+(?:BE\\s+)?DEDUCT(?:ED)?)[\\s\\S]*?${conditionBoundary}` +
+      `|(?:(?:[0-9]{1,2}|[A-Z])[\\.\\)]\\s*)?(?:(?:WE\\s+)?(?:WILL|SHALL)\\s+(?:BE\\s+)?DEDUCT(?:ED)?[\\s\\S]{1,60}?AS\\s+(?:PAYMENT|SETTLEMENT|REIMBURSEMENT)\\s+(?:FEE|CHARGE)[S]?)[\\s\\S]*?${conditionBoundary}` +
       `|(?:(?:AN\\s+AMOUNT\\s+OF\\s+)?(?:USD|EUR|GBP)?\\s*[\\d.]+\\s+AS\\s+(?:DOCUMENT\\s+)?SETTLEMENT[\\s\\S]*?${conditionBoundary})`,
       'gi'
     );
     let pMatch;
     while ((pMatch = paymentRegexGlobal.exec(textWithout71D)) !== null) {
       const snippet = pMatch[0].trim();
+      if (snippet.includes('DISCREPA')) continue; // Skip accidental overlap with discrepancy condition
       const upperSnippet = snippet.toUpperCase();
 
       const isBorneByApplicant =
