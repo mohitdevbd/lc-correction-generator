@@ -25,20 +25,20 @@ export const CORRECTION_TEMPLATES: CorrectionTemplate[] = [
     id: 'payment_clause',
     title: 'Payment Clause',
     category: 'clauses',
-    shortDescription: 'Specify payment terms, period, and conditions clearly in LC',
+    shortDescription: 'Specify clear payment terms and remittance conditions in LC',
     icon: 'CreditCard',
-    relevantFields: ['currentTenor', 'requiredTenor'],
+    relevantFields: ['additionalNote'],
     emailTemplate: (details) => {
-      if (details.requiredTenor?.trim()) {
-        return `Please add a payment clause in the LC as per the agreed terms/PI: "${details.requiredTenor.trim()}".`;
+      if (details.additionalNote?.trim()) {
+        return `Please add a payment clause in the LC as follows: "${details.additionalNote.trim()}".`;
       }
       return 'Please add a payment clause in the LC as per the agreed terms/PI.';
     },
     messageTemplate: (details) => {
-      if (details.requiredTenor?.trim()) {
-        return `Add payment clause as per agreed terms/PI: ${details.requiredTenor.trim()}.`;
+      if (details.additionalNote?.trim()) {
+        return `Add payment clause: ${details.additionalNote.trim()}.`;
       }
-      return 'Add payment clause in the LC as per the agreed terms/PI.';
+      return 'Add payment clause in the LC as per agreed terms/PI.';
     }
   },
   {

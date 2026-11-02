@@ -699,6 +699,36 @@ export function auditLcText(text: string, settings?: UserSettings): LcAuditResul
   }
 
   // ==========================================
+  // RULE 7F: Missing Payment Clause Check (Field 78 / Conditions)
+  // ==========================================
+  // Checks strictly whether a payment clause / instruction exists in the LC (e.g. remittance at maturity, RTGS, payment against compliant docs).
+  // Note: Tenor is completely separate (Field 42C tenor is checked under Rule 7C).
+  const hasPaymentTerms = upper.includes('EFFECT PAYMENT') ||
+                          upper.includes('MAKE PAYMENT') ||
+                          upper.includes('PAYMENT AT MATURITY') ||
+                          upper.includes('PAYMENT ON MATURITY') ||
+                          upper.includes('PAYMENT IN USD') ||
+                          upper.includes('REMIT PROCEEDS') ||
+                          upper.includes('REMIT THE PROCEEDS') ||
+                          upper.includes('PAYMENT WILL BE MADE') ||
+                          upper.includes('PAYMENT THROUGH RTGS') ||
+                          upper.includes('PAYMENT AGAINST COMPLIANT') ||
+                          upper.includes('PAYMENT AGAINST DOCUMENTS') ||
+                          (upper.includes('F78:') && upper.includes('PAYMENT')) ||
+                          (upper.includes(':78:') && upper.includes('PAYMENT'));
+
+  if (!hasPaymentTerms) {
+    issues.push({
+      id: 'issue_missing_payment_clause',
+      correctionId: 'payment_clause',
+      title: 'Missing Payment Clause in LC',
+      severity: 'warning',
+      reason: 'The LC does not contain a clear payment instruction or settlement clause (e.g. Field 78) specifying how and when payment will be remitted to the negotiating/presenting bank.',
+      detectedText: 'No payment instruction or remittance clause found in LC conditions'
+    });
+  }
+
+  // ==========================================
   // RULE 7G: Partial Payment / Partial Drawing Not Allowed Check
   // ==========================================
   const isPartialPaymentRestricted = /PARTIAL\s+PAYMENT[S]?\s+(?:IS\s+|ARE\s+)?NOT\s+ALLOWED/i.test(normalizedText) ||
