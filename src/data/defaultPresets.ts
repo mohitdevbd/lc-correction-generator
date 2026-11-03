@@ -52,9 +52,9 @@ export const QUICK_PRESETS: QuickPreset[] = [
     id: 'preset_physical_verification',
     name: 'Physical Verification',
     icon: 'ShieldOff',
-    tag: 'Clause 13',
+    tag: 'Physical Verif',
     correctionIds: ['physical_verification_clause', 'acceptance_clause'],
-    description: 'Delete Clause 13 & fix acceptance clause'
+    description: 'Delete physical verification & fix acceptance clause'
   },
   {
     id: 'preset_bank_charges_cap',

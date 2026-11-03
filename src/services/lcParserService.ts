@@ -587,8 +587,7 @@ export function auditLcText(text: string, settings?: UserSettings): LcAuditResul
           discrepancyChargeInLc: discAmt.toFixed(2),
           paymentChargeInLc: totalPaymentFeeBeneficiary.toFixed(2),
           acceptableDiscrepancyCharge: '25.00',
-          acceptablePaymentCharge: '25.00',
-          additionalNote: cableSwiftTotal > 0 ? `Cable/SWIFT charge USD ${cableSwiftTotal.toFixed(2)}` : ''
+          acceptablePaymentCharge: '25.00'
         }
       });
     } else if (discNeedsRevision && !payNeedsRevision) {
@@ -691,26 +690,37 @@ export function auditLcText(text: string, settings?: UserSettings): LcAuditResul
   // RULE 3: Acceptance After Physical Verification / Receipt – Delete
   // ==========================================
   const hasPhysicalVerificationMention =
-    upper.includes('PHYSICAL VERIFICATION') ||
-    upper.includes('VERIFICATION OF GOODS') ||
-    upper.includes('PHYSICAL RECEIPT') ||
-    upper.includes('RECEIPT OF GOODS') ||
-    (upper.includes('CUSTOMS CLEARANCE') && upper.includes('ACCEPTANCE'));
+    /PHYSICAL\s*VERIFICATION/i.test(normalizedText) ||
+    /VERIFICATION\s+OF\s+GOODS/i.test(normalizedText) ||
+    /PHYSICAL\s*RECEIPT/i.test(normalizedText) ||
+    /RECEIPT\s+OF\s+GOODS/i.test(normalizedText) ||
+    (/CUSTOMS\s+CLEARANCE/i.test(normalizedText) && /ACCEPTANCE/i.test(normalizedText));
 
   if (hasPhysicalVerificationMention) {
-    const isPhysicalVerif = upper.includes('PHYSICAL VERIFICATION') || upper.includes('VERIFICATION OF GOODS');
-    const snippet = extractSnippet(normalizedText, /(?:ACCEPTANCE[\s\S]{0,60}?PHYSICAL\s*VERIFICATION[\s\S]{0,60}?(?:\.|$)|PHYSICAL\s*VERIFICATION[\s\S]{0,60}?(?:\.|$)|ACCEPTANCE\s+WILL\s+BE\s+GIVEN\s+AFTER[\s\S]{0,60}?(?:\.|$)|PHYSICAL\s*RECEIPT[\s\S]{0,60}?(?:\.|$)|RECEIPT\s*OF\s*GOODS[\s\S]{0,60}?(?:\.|$))/i);
+    const isPhysicalVerif = /PHYSICAL\s*VERIFICATION|VERIFICATION\s+OF\s+GOODS/i.test(normalizedText);
+    const pvClauseMatch = normalizedText.match(/(?:(?:\n|\.|;|^)\s*(?:CLAUSE\s+)?([0-9]{1,2}|[A-Z])[\.\)]\s*)([^\n\.;]*?(?:PHYSICAL\s*VERIFICATION|VERIFICATION\s+OF\s+GOODS|PHYSICAL\s*RECEIPT|RECEIPT\s+OF\s+GOODS)[^\n\.;]*)/i);
+    const detectedClauseNumber = pvClauseMatch && pvClauseMatch[1] ? `Clause ${pvClauseMatch[1].trim()}` : '';
+
+    const snippet = pvClauseMatch
+      ? pvClauseMatch[0].trim().replace(/\s+/g, ' ')
+      : extractSnippet(normalizedText, /(?:ACCEPTANCE[\s\S]{0,60}?PHYSICAL\s*VERIFICATION[\s\S]{0,60}?(?:\.|$)|PHYSICAL\s*VERIFICATION[\s\S]{0,60}?(?:\.|$)|ACCEPTANCE\s+WILL\s+BE\s+GIVEN\s+AFTER[\s\S]{0,60}?(?:\.|$)|PHYSICAL\s*RECEIPT[\s\S]{0,60}?(?:\.|$)|RECEIPT\s*OF\s*GOODS[\s\S]{0,60}?(?:\.|$))/i);
+
     issues.push({
       id: 'issue_physical_verification_clause',
       correctionId: 'physical_verification_clause',
-      title: isPhysicalVerif
-        ? 'Physical Verification of Goods Clause – Delete (Violates UCP 600)'
-        : 'Acceptance After Physical Receipt Clause (Violates UCP 600)',
+      title: detectedClauseNumber
+        ? `${detectedClauseNumber} – Physical Verification of Goods (Delete)`
+        : (isPhysicalVerif
+            ? 'Physical Verification of Goods Clause – Delete (Violates UCP 600)'
+            : 'Acceptance After Physical Receipt Clause (Violates UCP 600)'),
       severity: 'critical',
       reason: isPhysicalVerif
-        ? 'Bill acceptance or payment cannot be made conditional upon physical verification of goods (e.g. "ACCEPTANCE WILL BE GIVEN AFTER PHYSICAL VERIFICATION OF GOODS"). In accordance with UCP 600, banks deal with documents and not goods; acceptance must be strictly issued against compliant shipping documents.'
-        : 'Bill acceptance cannot be made conditional upon physical arrival or inspection of goods. Under UCP 600, payment/acceptance must be strictly against compliant documents.',
-      detectedText: snippet || (isPhysicalVerif ? 'Acceptance conditional upon physical verification of goods' : 'Acceptance after physical receipt of goods')
+        ? `Bill acceptance or payment cannot be made conditional upon physical verification of goods${detectedClauseNumber ? ` (${detectedClauseNumber})` : ''}. In accordance with UCP 600, banks deal with documents and not goods; acceptance must be strictly issued against compliant shipping documents.`
+        : `Bill acceptance cannot be made conditional upon physical arrival or inspection of goods${detectedClauseNumber ? ` (${detectedClauseNumber})` : ''}. Under UCP 600, payment/acceptance must be strictly against compliant documents.`,
+      detectedText: snippet || (isPhysicalVerif ? 'Acceptance conditional upon physical verification of goods' : 'Acceptance after physical receipt of goods'),
+      suggestedDetails: {
+        clauseNumber: detectedClauseNumber
+      }
     });
   }
 

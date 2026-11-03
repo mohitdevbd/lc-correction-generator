@@ -9,16 +9,20 @@ export const CORRECTION_TEMPLATES: CorrectionTemplate[] = [
     icon: 'ClockAlert',
     relevantFields: ['additionalNote'],
     emailTemplate: (details) => {
-      if (details.additionalNote?.trim()) {
-        return `Please add an overdue clause in the LC as follows: "${details.additionalNote.trim()}".`;
+      const note = details.additionalNote?.trim();
+      const isGenuineOverdueNote = note && /overdue|interest|penalty|delayed\s+payment/i.test(note) && !/cable|swift|charge\s+usd/i.test(note);
+      if (isGenuineOverdueNote) {
+        return `Please add an overdue clause in the LC as follows: "${note}".`;
       }
-      return 'Please add an overdue clause in the LC as per the agreed terms/PI.';
+      return 'Please add an overdue interest clause in the LC as per the agreed terms/PI.';
     },
     messageTemplate: (details) => {
-      if (details.additionalNote?.trim()) {
-        return `Add overdue clause (${details.additionalNote.trim()}).`;
+      const note = details.additionalNote?.trim();
+      const isGenuineOverdueNote = note && /overdue|interest|penalty|delayed\s+payment/i.test(note) && !/cable|swift|charge\s+usd/i.test(note);
+      if (isGenuineOverdueNote) {
+        return `Add overdue clause (${note}).`;
       }
-      return 'Add overdue clause as per agreed terms.';
+      return 'Add overdue interest clause as per agreed terms.';
     }
   },
   {
@@ -384,11 +388,11 @@ export const CORRECTION_TEMPLATES: CorrectionTemplate[] = [
     id: 'physical_verification_clause',
     title: 'Physical Verification Clause – Delete',
     category: 'clauses',
-    shortDescription: 'Delete Clause 13 / physical goods verification conditions',
+    shortDescription: 'Delete physical goods verification / inspection condition',
     icon: 'ShieldOff',
     relevantFields: ['clauseNumber', 'additionalNote'],
     emailTemplate: (details, _, allSelectedIds) => {
-      const clauseNo = details.clauseNumber?.trim() || 'Clause 13';
+      const clauseNo = details.clauseNumber?.trim() || 'the clause';
       const hasAcceptance = allSelectedIds?.includes('acceptance_clause') || allSelectedIds?.includes('acceptance_after_receipt_deletion');
       if (hasAcceptance) {
         return `Please delete ${clauseNo} regarding physical verification. Acceptance should not be subject to physical receipt of goods or verification by the applicant's bank officials.`;
@@ -396,7 +400,7 @@ export const CORRECTION_TEMPLATES: CorrectionTemplate[] = [
       return `Please delete ${clauseNo} regarding physical verification. Payment/acceptance must be strictly against compliant documents as per UCP 600.`;
     },
     messageTemplate: (details) => {
-      const clauseNo = details.clauseNumber?.trim() || 'Clause 13';
+      const clauseNo = details.clauseNumber?.trim() || 'the clause';
       return `Delete ${clauseNo} (physical verification condition).`;
     }
   },

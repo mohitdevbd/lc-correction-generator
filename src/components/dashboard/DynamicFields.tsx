@@ -352,7 +352,7 @@ export const DynamicFields: React.FC<DynamicFieldsProps> = ({
                 type="text"
                 value={details.clauseNumber || ''}
                 onChange={(e) => onChange('clauseNumber', e.target.value)}
-                placeholder="Clause 13 (default)"
+                placeholder="e.g. Clause 07, Clause 13 (or leave blank)"
                 className="w-full px-2.5 py-1.5 text-xs rounded-lg border border-slate-300 focus:outline-hidden focus:ring-1 focus:ring-blue-500 focus:border-blue-500 bg-white"
               />
             </div>
