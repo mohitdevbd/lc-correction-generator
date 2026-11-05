@@ -76,6 +76,10 @@ export const CORRECTION_TEMPLATES: CorrectionTemplate[] = [
     relevantFields: ['maxChargeAmount', 'currency'],
     emailTemplate: (details, settings) => {
       const curr = details.currency || settings.defaultCurrency || 'USD';
+      const maxAmt = details.maxChargeAmount?.trim() || details.acceptableDiscrepancyCharge?.trim() || '25.00';
+      if (details.discrepancyChargeInLc?.trim()) {
+        return `The discrepancy handling charge in the LC is ${curr} ${details.discrepancyChargeInLc.trim()}, which exceeds our acceptable limit. Please amend the discrepancy handling charge so that it does not exceed ${curr} ${maxAmt}. Charges exceeding this limit will not be acceptable.`;
+      }
       if (details.maxChargeAmount?.trim()) {
         return `The discrepancy handling charge should not exceed ${curr} ${details.maxChargeAmount.trim()}. Charges exceeding this agreed limit will not be acceptable.`;
       }

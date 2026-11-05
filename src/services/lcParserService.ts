@@ -329,11 +329,15 @@ export function auditLcText(text: string, settings?: UserSettings): LcAuditResul
   let isDiscOnApplicant = false;
   let discSnippet = '';
 
-  // Top-level condition boundary: stops before next numbered (e.g. 1. or 4) or 10.) or lettered (e.g. A. or G.) condition, or SWIFT tag (:XX:, FXX:, 71D:, 78:), or ALL CHARGES
-  const conditionBoundary = '(?=(?:(?:\\n|\\.|;)\\s*(?:[0-9]{1,2}[\\.\\)]|\\b[A-Z][\\.\\)])\\s+[A-Z]|\\n\\s*:[0-9]{2}[A-Z]?:|\\s+:[0-9]{2}:|\\n\\s*F[0-9]{2}[A-Z]?:|\\n\\s*[0-9]{2}[A-Z]?\\s*:|\\s+[0-9]{2}[A-Z]?\\s*:|\\bALL\\s+(?:BANKING|BANK)?\\s*CHARGES|$))';
+  // Top-level condition boundary: stops before next numbered (e.g. 1. or 4) or 10.) or lettered (e.g. A. or G.) condition, or bullet (+), or SWIFT tag (:XX:, FXX:, 71D:, 78:), or ALL CHARGES
+  const conditionBoundary = '(?=(?:(?:\\n|\\.|;|:)\\s*(?:[0-9]{1,2}[\\.\\)]|\\b[A-Z][\\.\\)]|\\+)\\s+[A-Z]|\\n\\s*:[0-9]{2}[A-Z]?:|\\s+:[0-9]{2}[A-Z]?:|\\n\\s*F[0-9]{2}[A-Z]?:|\\n\\s*[0-9]{2}[A-Z]?\\s*:|\\s+[0-9]{2}[A-Z]?\\s*:|\\bALL\\s+(?:BANKING|BANK)?\\s*CHARGES|$))';
 
   const discRegex = new RegExp(
-    `(?:(?:[0-9]{1,2}|[A-Z])[\\.\\)]\\s*)?(?:IN\\s+CASE\\s+OF\\s+DISCREPA[A-Z]*|DISCREPA[A-Z]*\\s*(?:FEE|CHARGE|COMMISSION|COST|DOCUMENTS?)?)[^\\n]*?[\\s\\S]*?${conditionBoundary}`,
+    `(?:` +
+      `(?:(?:[0-9]{1,2}|[A-Z])[\\.\\)]|\\+)?\\s*(?:A\\s+)?(?:FEE|CHARGE|COST|COMMISSION|EXPENSE|AN?\\s+AMOUNT)\\s+(?:OF\\s+)?(?:USD|EUR|GBP)?\\s*\\d+[\\s\\S]*?DISCREPA[A-Z]*[\\s\\S]*?${conditionBoundary}` +
+      `|(?:(?:[0-9]{1,2}|[A-Z])[\\.\\)]|\\+)?\\s*(?:IN\\s+CASE\\s+OF\\s+DISCREPA[A-Z]*|DISCREPA[A-Z]*\\s*(?:FEE|CHARGE|COMMISSION|COST|DOCUMENTS?)?)[\\s\\S]*?${conditionBoundary}` +
+      `|(?:(?:[0-9]{1,2}|[A-Z])[\\.\\)]|\\+)?\\s*(?:(?:WE\\s+)?(?:WILL|SHALL)\\s+(?:BE\\s+)?DEDUCT(?:ED)?)[\\s\\S]*?DISCREPA[A-Z]*[\\s\\S]*?${conditionBoundary}` +
+    `)`,
     'i'
   );
   const discMatch = textWithout71D.match(discRegex);
@@ -347,8 +351,12 @@ export function auditLcText(text: string, settings?: UserSettings): LcAuditResul
     const discIndex = textWithout71D.search(/DISCREPA/i);
     if (discIndex !== -1) {
       hasDiscrepancyMention = true;
-      const clauseSnippet = textWithout71D.substring(discIndex, discIndex + 400);
-      const tagStop = clauseSnippet.search(/(?:\n\s*:[0-9]{2}[A-Z]?:|\n\s*F[0-9]{2}[A-Z]?:|:[0-9]{2}:|\n\s*(?:[0-9]{1,2}\.|\b[A-Z]\.))/);
+      const lookBackStart = Math.max(0, discIndex - 150);
+      const precedingBlock = textWithout71D.substring(lookBackStart, discIndex);
+      const condStartMatch = precedingBlock.match(/(?:(?:\n|\.|;|:)\s*(?:[0-9]{1,2}[\\.\\)]|\\b[A-Z][\\.\\)]|\\+)\s+[A-Z]|:[0-9]{2}[A-Z]?:)[^\n\.;:]*$/i);
+      const effectiveStart = condStartMatch ? lookBackStart + condStartMatch.index! : lookBackStart;
+      const clauseSnippet = textWithout71D.substring(effectiveStart, discIndex + 400);
+      const tagStop = clauseSnippet.search(new RegExp(conditionBoundary, 'i'));
       cleanDiscSnippet = tagStop !== -1 ? clauseSnippet.substring(0, tagStop) : clauseSnippet;
       discSnippet = cleanDiscSnippet.replace(/\s+/g, ' ');
     }
@@ -635,6 +643,7 @@ export function auditLcText(text: string, settings?: UserSettings): LcAuditResul
         severity: 'warning',
         reason: `The discrepancy fee in the LC is USD ${discAmt.toFixed(2)} (${isDiscOnApplicant ? "Applicant's Account" : "Beneficiary's Account"}), which exceeds the standard acceptable limit of USD 25.00.`,
         detectedText: discSnippet,
+        chargeBreakdown,
         suggestedDetails: {
           discrepancyChargeInLc: discAmt.toFixed(2),
           acceptableDiscrepancyCharge: '25.00',
