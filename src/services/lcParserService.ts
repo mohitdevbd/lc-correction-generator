@@ -313,6 +313,13 @@ export function auditLcText(text: string, settings?: UserSettings): LcAuditResul
       const hasAmendmentOnBene = chargesBlock.includes('AMENDMENT');
       const hasCourierOnBene = chargesBlock.includes('COURIER') || chargesBlock.includes('POSTAGE');
 
+      const hasOutsideBangladeshOnBene =
+        (chargesBlock.includes('OUTSIDE BANGLADESH') ||
+         chargesBlock.includes('OUT SIDE BANGLADESH') ||
+         chargesBlock.includes('OUT-SIDE BANGLADESH') ||
+         chargesBlock.includes('OUTSIDE BD')) &&
+        hasBeneficiaryCharge;
+
       if (hasInsideOrIssuingCharges) {
         const snippet = extractSnippet(normalizedText, /(?:ALL (?:BANK )?CHARGES|ISSUING BANK CHARGES|OUR CHARGES|INSIDE BANGLADESH)[\s\S]{0,120}BENEFICIARY/i) || (chargesMatch ? chargesMatch[1].trim() : '');
         issues.push({
@@ -321,6 +328,16 @@ export function auditLcText(text: string, settings?: UserSettings): LcAuditResul
           title: 'Clause 71D – Issuing Bank / Local Charges on Beneficiary',
           severity: 'critical',
           reason: 'Field 71D places issuing bank charges or charges inside issuing counter / Bangladesh on the Beneficiary. As per standard practice, all issuing bank / local counter charges must be for Applicant\'s account.',
+          detectedText: snippet
+        });
+      } else if (hasOutsideBangladeshOnBene) {
+        const snippet = extractSnippet(normalizedText, /(?:OUT\s*SIDE\s*(?:BANGLADESH|BD)|ALL (?:BANK )?CHARGES)[\s\S]{0,120}BENEFICIARY/i) || (chargesMatch ? chargesMatch[1].trim() : '');
+        issues.push({
+          id: 'issue_clause_71d_outside_bangladesh',
+          correctionId: 'clause_71d_bank_charges',
+          title: 'Clause 71D – Bank Charges Outside Bangladesh on Beneficiary',
+          severity: 'warning',
+          reason: 'Field 71D places all banking charges outside Bangladesh on the Beneficiary. As per agreed commercial terms, all banking charges outside Bangladesh must be for Applicant\'s account.',
           detectedText: snippet
         });
       } else if (hasConfirmationOnBene || hasAdvisingOnBene || hasAmendmentOnBene || hasCourierOnBene) {
