@@ -259,10 +259,90 @@ export function auditLcText(text: string, settings?: UserSettings): LcAuditResul
   // ==========================================
   // RULE 1: Field 71D (Banking Charges)
   // ==========================================
-  // Note: 71D charges (including reimbursement charges) are not placed in a separate 71D category;
-  // they are audited jointly under Discrepancy & Payment/Settlement charges (Rule 2).
+  // Evaluates Field 71D:
+  // 1. Allowed fee types (Payment, Settlement, Reimbursement, RTGS, Fund Transfer, Discrepancy, Handling Charge)
+  //    are audited under Discrepancy & Payment/Settlement rules (Rule 2).
+  // 2. Clauses like "ALL BANK CHARGES OUTSIDE BANGLADESH / OUTSIDE OUR COUNTER ARE ON BENEFICIARY'S ACCOUNT"
+  //    are ACCEPTABLE and NOT flagged.
+  // 3. Flags IF AND ONLY IF:
+  //    a) Issuing bank places charges inside their country / inside counter on Beneficiary.
+  //    b) Unauthorized fees (e.g. Confirmation, Advising, Amendment, Courier) are placed on Beneficiary.
   const chargesMatch = normalizedText.match(/(?::71D:|:71B:|(?:\b|\n|\s+)F71D:[^\n]*Charges|(?:\b|\n|\s+)F71D\s*:\s*(?:CHARGES)?|(?:\b|\n)\s*71D\s*:\s*(?:CHARGES)?)[ \t]*(?:Charges[ \t]*)?[:#]?\s*([\s\S]{1,400}?)(?=(?:\n:[0-9]{2}|\s+:[0-9]{2}:|(?:\n|\s+)F[0-9]{2}|\n\s*[0-9]{2}[A-Z]?\s*:|\s+[0-9]{2}[A-Z]?\s*:|$))/i);
   const chargesBlock = chargesMatch ? chargesMatch[1].toUpperCase() : '';
+
+  if (chargesBlock) {
+    const hasBeneficiaryCharge =
+      chargesBlock.includes('FOR ACCOUNT OF BENEFICIARY') ||
+      chargesBlock.includes("FOR BENEFICIARY'S ACCOUNT") ||
+      chargesBlock.includes('FOR BENEFICIARY ACCOUNT') ||
+      chargesBlock.includes('ON ACCOUNT OF BENEFICIARY') ||
+      chargesBlock.includes("ON BENEFICIARY'S ACCOUNT") ||
+      chargesBlock.includes('ON BENEFICIARY ACCOUNT') ||
+      chargesBlock.includes('ARE ON BENEFICIARY') ||
+      chargesBlock.includes('BE ON BENEFICIARY') ||
+      chargesBlock.includes('WILL BE ON BENEFICIARY') ||
+      chargesBlock.includes('BORNE BY BENEFICIARY');
+
+    if (hasBeneficiaryCharge) {
+      const hasOutsideQualifier =
+        chargesBlock.includes('OUTSIDE ISSUING') ||
+        chargesBlock.includes('OUTSIDE THE ISSUING') ||
+        chargesBlock.includes('OUTSIDE ISSUING BANK') ||
+        chargesBlock.includes("OUTSIDE ISSUING BANK'S") ||
+        chargesBlock.includes('OUT SIDE ISSUING BANK') ||
+        chargesBlock.includes("OUT SIDE ISSUING BANK'S") ||
+        chargesBlock.includes('OUTSIDE OUR COUNTER') ||
+        chargesBlock.includes('OUT SIDE OUR COUNTER') ||
+        chargesBlock.includes('OUTSIDE OF OUR COUNTER') ||
+        chargesBlock.includes('OUTSIDE BANGLADESH') ||
+        chargesBlock.includes('OUT SIDE BANGLADESH');
+
+      const hasInsideOrIssuingCharges =
+        chargesBlock.includes('INSIDE BANGLADESH') ||
+        chargesBlock.includes('IN BANGLADESH') ||
+        chargesBlock.includes('WITHIN BANGLADESH') ||
+        chargesBlock.includes('AT OUR COUNTER') ||
+        chargesBlock.includes('INSIDE OUR COUNTER') ||
+        chargesBlock.includes('ISSUING BANK CHARGES') ||
+        chargesBlock.includes('OUR CHARGES') ||
+        ((chargesBlock.includes('ALL CHARGES') || chargesBlock.includes('ALL BANK CHARGES') || chargesBlock.includes('ALL BANKING CHARGES')) && !hasOutsideQualifier);
+
+      // Check for unauthorized extra fees placed on beneficiary in 71D:
+      const hasConfirmationOnBene = chargesBlock.includes('CONFIRMATION');
+      const hasAdvisingOnBene = chargesBlock.includes('ADVISING');
+      const hasAmendmentOnBene = chargesBlock.includes('AMENDMENT');
+      const hasCourierOnBene = chargesBlock.includes('COURIER') || chargesBlock.includes('POSTAGE');
+
+      if (hasInsideOrIssuingCharges) {
+        const snippet = extractSnippet(normalizedText, /(?:ALL (?:BANK )?CHARGES|ISSUING BANK CHARGES|OUR CHARGES|INSIDE BANGLADESH)[\s\S]{0,120}BENEFICIARY/i) || (chargesMatch ? chargesMatch[1].trim() : '');
+        issues.push({
+          id: 'issue_clause_71d_issuing_charges',
+          correctionId: 'clause_71d_bank_charges',
+          title: 'Clause 71D – Issuing Bank / Local Charges on Beneficiary',
+          severity: 'critical',
+          reason: 'Field 71D places issuing bank charges or charges inside issuing counter / Bangladesh on the Beneficiary. As per standard practice, all issuing bank / local counter charges must be for Applicant\'s account.',
+          detectedText: snippet
+        });
+      } else if (hasConfirmationOnBene || hasAdvisingOnBene || hasAmendmentOnBene || hasCourierOnBene) {
+        const extraFeeTypes = [
+          hasConfirmationOnBene ? 'Confirmation charges' : '',
+          hasAdvisingOnBene ? 'Advising charges' : '',
+          hasAmendmentOnBene ? 'Amendment charges' : '',
+          hasCourierOnBene ? 'Courier/Postage charges' : ''
+        ].filter(Boolean).join(', ');
+
+        const snippet = extractSnippet(normalizedText, /(?:CONFIRMATION|ADVISING|AMENDMENT|COURIER)[\s\S]{0,120}BENEFICIARY/i) || (chargesMatch ? chargesMatch[1].trim() : '');
+        issues.push({
+          id: 'issue_clause_71d_unauthorized_fees',
+          correctionId: 'clause_71d_bank_charges',
+          title: `Clause 71D – Unauthorized Charges on Beneficiary (${extraFeeTypes})`,
+          severity: 'warning',
+          reason: `Field 71D places unauthorized extra charges (${extraFeeTypes}) on the Beneficiary. Beneficiary should only bear standard discrepancy & payment processing charges within limits. All other bank charges must be for Applicant's account.`,
+          detectedText: snippet
+        });
+      }
+    }
+  }
 
   // ==========================================
   // RULE 2: Discrepancy Fee & Payment/Settlement/Reimbursement/RTGS/Cable Charges Audit
@@ -348,7 +428,7 @@ export function auditLcText(text: string, settings?: UserSettings): LcAuditResul
                                   paymentDeductRegex.test(textWithout71D) ||
                                   docSettlementRegex.test(textWithout71D) ||
                                   /DEDUCT\s+(?:PAYMENT|SETTLEMENT|REIMBURSEMENT)\s+CHARGE/i.test(textWithout71D) ||
-                                  Boolean(chargesBlock && (chargesBlock.includes('REIMBURS') || chargesBlock.includes('PAYMENT CHARGE')));
+                                  Boolean(chargesBlock && /(?:REIMBURS|PAYMENT|SETTLEMENT|RTGS|FUND\s*TRANSFER|HANDLING)/i.test(chargesBlock));
 
   let totalPaymentFeeBeneficiary = 0;
   let totalPaymentFeeApplicant = 0;
@@ -415,12 +495,12 @@ export function auditLcText(text: string, settings?: UserSettings): LcAuditResul
       }
     }
 
-    // Field 71D payment / reimbursement charge check (jointly audited with Payment/Settlement charges)
-    if (chargesBlock && chargesMatch && (chargesBlock.includes('REIMBURS') || chargesBlock.includes('PAYMENT CHARGE') || chargesBlock.includes('BANK CHARGES'))) {
+    // Field 71D payment / reimbursement / handling / fund transfer charge check (jointly audited with Payment/Settlement charges)
+    if (chargesBlock && chargesMatch && /(?:REIMBURS|PAYMENT|SETTLEMENT|RTGS|FUND\s*TRANSFER|HANDLING)/i.test(chargesBlock)) {
       const is71dBene = chargesBlock.includes('BENEFICIARY');
       const is71dApplicant = (chargesBlock.includes('APPLICANT') || chargesBlock.includes('BUYER')) && !is71dBene;
 
-      const f71dFeeMatch = chargesMatch[1].match(/(?:(?:USD|EUR|GBP)\s*(\d+(?:\.\d{2})?)|(?:REIMBURSEMENT|PAYMENT|SETTLEMENT|BANKING|BANK)?\s*(?:CHARGE|FEE|COMMISSION|COST)[^\d\n]{0,25}?(?:USD|EUR|GBP)?\s*(\d+(?:\.\d{2})?)|(\d+(?:\.\d{2})?)\s*(?:USD|EUR|GBP))\b/i);
+      const f71dFeeMatch = chargesMatch[1].match(/(?:(?:USD|EUR|GBP)\s*(\d+(?:\.\d{2})?)|(?:REIMBURSEMENT|PAYMENT|SETTLEMENT|RTGS|FUND\s*TRANSFER|HANDLING|BANKING|BANK)?\s*(?:CHARGE|FEE|COMMISSION|COST)[^\d\n]{0,25}?(?:USD|EUR|GBP)?\s*(\d+(?:\.\d{2})?)|(\d+(?:\.\d{2})?)\s*(?:USD|EUR|GBP))\b/i);
       if (f71dFeeMatch) {
         const feeVal = parseFloat(f71dFeeMatch[1] || f71dFeeMatch[2] || f71dFeeMatch[3]);
         if (feeVal > 0 && feeVal <= 300 && !detectedPaymentFees.some(f => f.amount === feeVal)) {
