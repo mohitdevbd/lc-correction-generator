@@ -256,64 +256,13 @@ export function auditLcText(text: string, settings?: UserSettings): LcAuditResul
   const issues: LcAuditIssue[] = [];
 
   // ==========================================
-  // RULE 1: Field 71D – Genuinely Problematic Charges on Beneficiary
   // ==========================================
+  // RULE 1: Field 71D (Banking Charges)
+  // ==========================================
+  // Note: 71D charges (including reimbursement charges) are not placed in a separate 71D category;
+  // they are audited jointly under Discrepancy & Payment/Settlement charges (Rule 2).
   const chargesMatch = normalizedText.match(/(?::71D:|:71B:|(?:\b|\n|\s+)F71D:[^\n]*Charges|(?:\b|\n|\s+)F71D\s*:\s*(?:CHARGES)?|(?:\b|\n)\s*71D\s*:\s*(?:CHARGES)?)[ \t]*(?:Charges[ \t]*)?[:#]?\s*([\s\S]{1,400}?)(?=(?:\n:[0-9]{2}|\s+:[0-9]{2}:|(?:\n|\s+)F[0-9]{2}|\n\s*[0-9]{2}[A-Z]?\s*:|\s+[0-9]{2}[A-Z]?\s*:|$))/i);
   const chargesBlock = chargesMatch ? chargesMatch[1].toUpperCase() : '';
-
-  if (chargesBlock) {
-    const hasOutsideIssuingQualifier =
-      chargesBlock.includes('OUTSIDE ISSUING') ||
-      chargesBlock.includes('OUTSIDE THE ISSUING') ||
-      chargesBlock.includes('OUTSIDE ISSUING BANK') ||
-      chargesBlock.includes("OUTSIDE ISSUING BANK'S") ||
-      chargesBlock.includes('OUT SIDE ISSUING BANK') ||
-      chargesBlock.includes("OUT SIDE ISSUING BANK'S") ||
-      chargesBlock.includes('OUTSIDE OUR COUNTER') ||
-      chargesBlock.includes('OUT SIDE OUR COUNTER') ||
-      chargesBlock.includes('OUTSIDE OF OUR COUNTER') ||
-      chargesBlock.includes('OUTSIDE BANGLADESH');
-
-    const hasBeneficiaryCharge =
-      chargesBlock.includes('FOR ACCOUNT OF BENEFICIARY') ||
-      chargesBlock.includes("FOR BENEFICIARY'S ACCOUNT") ||
-      chargesBlock.includes('FOR BENEFICIARY ACCOUNT') ||
-      chargesBlock.includes('ON ACCOUNT OF BENEFICIARY') ||
-      chargesBlock.includes("ON BENEFICIARY'S ACCOUNT") ||
-      chargesBlock.includes('ON BENEFICIARY ACCOUNT') ||
-      chargesBlock.includes('ARE ON BENEFICIARY') ||
-      chargesBlock.includes('BE ON BENEFICIARY') ||
-      chargesBlock.includes('WILL BE ON BENEFICIARY') ||
-      chargesBlock.includes('BORNE BY BENEFICIARY');
-
-    const hasReimbursementOnBeneficiary =
-      (chargesBlock.includes('REIMBURS') && hasBeneficiaryCharge);
-
-    const hasAllChargesOnBeneficiary =
-      (chargesBlock.includes('ALL CHARGES') || chargesBlock.includes('ALL BANKING CHARGES')) &&
-      hasBeneficiaryCharge &&
-      !hasOutsideIssuingQualifier;
-
-    const hasOurChargesOnBeneficiary =
-      (chargesBlock.includes('OUR CHARGES') || chargesBlock.includes('ISSUING BANK CHARGES')) &&
-      hasBeneficiaryCharge;
-
-    if (hasReimbursementOnBeneficiary || hasAllChargesOnBeneficiary || hasOurChargesOnBeneficiary) {
-      const snippet = extractSnippet(normalizedText, /(?:ALL CHARGES|REIMBURS|OUR CHARGES)[\s\S]{0,120}BENEFICIARY/i);
-      issues.push({
-        id: 'issue_clause_71d',
-        correctionId: 'clause_71d_bank_charges',
-        title: 'Clause 71D – Reimbursement/Issuing Bank Charges on Beneficiary',
-        severity: 'critical',
-        reason: hasReimbursementOnBeneficiary
-          ? 'Field 71D places Reimbursement Charges ("all charges including reimbursement charge out side issuing bank\'s counter") on the Beneficiary. Reimbursement charges must be for Applicant\'s account.'
-          : hasOurChargesOnBeneficiary
-          ? 'The issuing bank\'s own charges are being placed on the beneficiary, which violates standard practice.'
-          : 'All banking charges are placed on beneficiary without outside issuing counter qualification.',
-        detectedText: snippet || 'Reimbursement charges on beneficiary account'
-      });
-    }
-  }
 
   // ==========================================
   // RULE 2: Discrepancy Fee & Payment/Settlement/Reimbursement/RTGS/Cable Charges Audit
@@ -398,7 +347,8 @@ export function auditLcText(text: string, settings?: UserSettings): LcAuditResul
   const hasAnyPaymentFeeMention = paymentFeeRegex.test(textWithout71D) ||
                                   paymentDeductRegex.test(textWithout71D) ||
                                   docSettlementRegex.test(textWithout71D) ||
-                                  /DEDUCT\s+(?:PAYMENT|SETTLEMENT|REIMBURSEMENT)\s+CHARGE/i.test(textWithout71D);
+                                  /DEDUCT\s+(?:PAYMENT|SETTLEMENT|REIMBURSEMENT)\s+CHARGE/i.test(textWithout71D) ||
+                                  Boolean(chargesBlock && (chargesBlock.includes('REIMBURS') || chargesBlock.includes('PAYMENT CHARGE')));
 
   let totalPaymentFeeBeneficiary = 0;
   let totalPaymentFeeApplicant = 0;
@@ -462,6 +412,26 @@ export function auditLcText(text: string, settings?: UserSettings): LcAuditResul
       if (feeVal > 0 && !detectedPaymentFees.some(f => f.amount === feeVal)) {
         totalPaymentFeeBeneficiary += feeVal;
         detectedPaymentFees.push({ type: 'Field 78 Payment Deduction', amount: feeVal, payer: 'Beneficiary', text: f78DeductMatch[0] });
+      }
+    }
+
+    // Field 71D payment / reimbursement charge check (jointly audited with Payment/Settlement charges)
+    if (chargesBlock && chargesMatch && (chargesBlock.includes('REIMBURS') || chargesBlock.includes('PAYMENT CHARGE') || chargesBlock.includes('BANK CHARGES'))) {
+      const is71dBene = chargesBlock.includes('BENEFICIARY');
+      const is71dApplicant = (chargesBlock.includes('APPLICANT') || chargesBlock.includes('BUYER')) && !is71dBene;
+
+      const f71dFeeMatch = chargesMatch[1].match(/(?:(?:USD|EUR|GBP)\s*(\d+(?:\.\d{2})?)|(?:REIMBURSEMENT|PAYMENT|SETTLEMENT|BANKING|BANK)?\s*(?:CHARGE|FEE|COMMISSION|COST)[^\d\n]{0,25}?(?:USD|EUR|GBP)?\s*(\d+(?:\.\d{2})?)|(\d+(?:\.\d{2})?)\s*(?:USD|EUR|GBP))\b/i);
+      if (f71dFeeMatch) {
+        const feeVal = parseFloat(f71dFeeMatch[1] || f71dFeeMatch[2] || f71dFeeMatch[3]);
+        if (feeVal > 0 && feeVal <= 300 && !detectedPaymentFees.some(f => f.amount === feeVal)) {
+          if (is71dApplicant) {
+            totalPaymentFeeApplicant += feeVal;
+            detectedPaymentFees.push({ type: 'Field 71D Reimbursement/Payment Charge', amount: feeVal, payer: 'Applicant', text: chargesMatch[1].trim() });
+          } else {
+            totalPaymentFeeBeneficiary += feeVal;
+            detectedPaymentFees.push({ type: 'Field 71D Reimbursement/Payment Charge', amount: feeVal, payer: 'Beneficiary', text: chargesMatch[1].trim() });
+          }
+        }
       }
     }
   }
