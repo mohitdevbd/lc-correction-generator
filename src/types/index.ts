@@ -164,6 +164,7 @@ export interface ChargePayerItem {
   currency?: string;
   payer: 'Beneficiary' | 'Applicant';
   clauseSnippet?: string;
+  clauseLocation?: string;
   isExceeding?: boolean;
 }
 
@@ -180,6 +181,7 @@ export interface LcAuditIssue {
   title: string;
   severity: AuditSeverity;
   reason: string;
+  clauseLocation?: string;
   detectedText?: string;
   suggestedDetails?: Partial<AdditionalDetails>;
   chargeBreakdown?: ChargeBreakdown;

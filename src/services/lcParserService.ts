@@ -212,6 +212,26 @@ function parseTieredFee(clauseText: string, lcAmount: number): { lowerFee: numbe
   return null;
 }
 
+function extractClauseNumber(snippet?: string): string | null {
+  if (!snippet) return null;
+  const trimmed = snippet.trim();
+  const m = trimmed.match(/^(?:Clause\s*)?([0-9]{1,2}|[A-Z])[\.\)]/i) ||
+            trimmed.match(/(?:^|\n|\b)(?:Clause\s*)?([0-9]{1,2}|[A-Z])[\.\)]\s*[A-Z]/i);
+  if (m) {
+    const raw = m[1];
+    return isNaN(Number(raw)) ? `Clause ${raw}` : `Clause ${raw.padStart(2, '0')}`;
+  }
+  return null;
+}
+
+function resolveClauseLocation(defaultField: string, snippet?: string): string {
+  const num = extractClauseNumber(snippet);
+  if (num) {
+    return `${defaultField}, ${num}`;
+  }
+  return defaultField;
+}
+
 /**
  * Parses SWIFT MT700 / LC fields and checks standard commercial audit rules.
  */
@@ -326,6 +346,7 @@ export function auditLcText(text: string, settings?: UserSettings): LcAuditResul
           id: 'issue_clause_71d_issuing_charges',
           correctionId: 'clause_71d_bank_charges',
           title: 'Clause 71D – Issuing Bank / Local Charges on Beneficiary',
+          clauseLocation: 'Field 71D',
           severity: 'critical',
           reason: 'Field 71D places issuing bank charges or charges inside issuing counter / Bangladesh on the Beneficiary. As per standard practice, all issuing bank / local counter charges must be for Applicant\'s account.',
           detectedText: snippet
@@ -336,6 +357,7 @@ export function auditLcText(text: string, settings?: UserSettings): LcAuditResul
           id: 'issue_clause_71d_outside_bangladesh',
           correctionId: 'clause_71d_bank_charges',
           title: 'Clause 71D – Bank Charges Outside Bangladesh on Beneficiary',
+          clauseLocation: 'Field 71D',
           severity: 'warning',
           reason: 'Field 71D places all banking charges outside Bangladesh on the Beneficiary. As per agreed commercial terms, all banking charges outside Bangladesh must be for Applicant\'s account.',
           detectedText: snippet
@@ -353,6 +375,7 @@ export function auditLcText(text: string, settings?: UserSettings): LcAuditResul
           id: 'issue_clause_71d_unauthorized_fees',
           correctionId: 'clause_71d_bank_charges',
           title: `Clause 71D – Unauthorized Charges on Beneficiary (${extraFeeTypes})`,
+          clauseLocation: 'Field 71D',
           severity: 'warning',
           reason: `Field 71D places unauthorized extra charges (${extraFeeTypes}) on the Beneficiary. Beneficiary should only bear standard discrepancy & payment processing charges within limits. All other bank charges must be for Applicant's account.`,
           detectedText: snippet
@@ -383,7 +406,7 @@ export function auditLcText(text: string, settings?: UserSettings): LcAuditResul
   const discRegex = new RegExp(
     `(?:` +
       `(?:(?:[0-9]{1,2}|[A-Z])[\\.\\)]|\\+)?\\s*(?:A\\s+)?(?:FEE|CHARGE|COST|COMMISSION|EXPENSE|AN?\\s+AMOUNT)\\s+(?:OF\\s+)?(?:USD|EUR|GBP)?\\s*\\d+[\\s\\S]*?DISCREPA[A-Z]*[\\s\\S]*?${conditionBoundary}` +
-      `|(?:(?:[0-9]{1,2}|[A-Z])[\\.\\)]|\\+)?\\s*(?:IN\\s+CASE\\s+OF\\s+DISCREPA[A-Z]*|DISCREPA[A-Z]*\\s*(?:FEE|CHARGE|COMMISSION|COST|DOCUMENTS?)?)[\\s\\S]*?${conditionBoundary}` +
+      `|(?:(?:[0-9]{1,2}|[A-Z])[\\.\\)]|\\+)?\\s*(?:(?:A\\s+)?(?:IN\\s+CASE\\s+OF\\s+)?DISCREPA[A-Z]*\\s*(?:FEE|CHARGE|COMMISSION|COST|DOCUMENTS?)?)[\\s\\S]*?${conditionBoundary}` +
       `|(?:(?:[0-9]{1,2}|[A-Z])[\\.\\)]|\\+)?\\s*(?:(?:WE\\s+)?(?:WILL|SHALL)\\s+(?:BE\\s+)?DEDUCT(?:ED)?)[\\s\\S]*?DISCREPA[A-Z]*[\\s\\S]*?${conditionBoundary}` +
     `)`,
     'i'
@@ -438,7 +461,7 @@ export function auditLcText(text: string, settings?: UserSettings): LcAuditResul
   }
 
   // 2. PAYMENT / REIMBURSEMENT / SETTLEMENT / FUND TRANSFER / RTGS CHARGES AUDIT:
-  const paymentFeeRegex = /(?:PAYMENT|REIMBURSEMENT|SETTLEMENT|DOCUMENT\s*SETTLEMENT|FUND\s*TRANSFER|RTGS)\s*(?:PROCESSING\s*)?(?:CHARGE|COMMISSION|FEE|COST|EXPENSE|OF\s+USD|AT\s+USD)/i;
+  const paymentFeeRegex = /(?:PAYMENT|REIMBURSEMENT|SETTLEMENT|DOCUMENT\s*SETTLEMENT|FUND\s*TRANSFER|RTGS)[\s\S]{0,40}?(?:CHARGE|COMMISSION|FEE|COST|EXPENSE|OF\s+USD|AT\s+USD|ATTRACT)/i;
   const paymentDeductRegex = /(?:(?:WE\s+)?(?:WILL|SHALL)\s+BE\s+DEDUCTED|WE\s+WILL\s+DEDUCT|DEDUCTED\s+FROM\s+(?:THE\s+)?BILL\s+VALUE)[\s\S]{1,60}?(?:AT\s+THE\s+TIME\s+OF\s+PAYMENT|PAYMENT)/i;
   const docSettlementRegex = /(?:AN\s+AMOUNT\s+OF\s+)?(?:USD|EUR|GBP)?\s*[\d.]+\s+AS\s+(?:DOCUMENT\s+)?SETTLEMENT/i;
   const hasAnyPaymentFeeMention = paymentFeeRegex.test(textWithout71D) ||
@@ -453,7 +476,7 @@ export function auditLcText(text: string, settings?: UserSettings): LcAuditResul
 
   if (hasAnyPaymentFeeMention) {
     const paymentRegexGlobal = new RegExp(
-      `(?:(?:(?:[0-9]{1,2}|[A-Z])[\\.\\)]\\s*)?(?:PAYMENT|SETTLEMENT|REIMBURSEMENT|DOCUMENT\\s*SETTLEMENT|FUND\\s*TRANSFER|RTGS)\\s*(?:PROCESSING\\s*)?(?:CHARGE|COMMISSION|FEE|COST|EXPENSE)[S]?[\\s\\S]*?${conditionBoundary})` +
+      `(?:(?:[0-9]{1,2}|[A-Z])[\\.\\)]\\s*)?(?:(?:EACH\\s+)?(?:PAYMENT|SETTLEMENT|REIMBURSEMENT|DOCUMENT\\s*SETTLEMENT|FUND\\s*TRANSFER|RTGS)[\\s\\S]{0,40}?(?:CHARGE|COMMISSION|FEE|COST|EXPENSE|ATTRACT)[S]?[\\s\\S]*?${conditionBoundary})` +
       `|(?:(?:[0-9]{1,2}|[A-Z])[\\.\\)]\\s*)?(?:AT\\s+THE\\s+TIME\\s+OF\\s+PAYMENT[\\s\\S]{1,60}?(?:WE\\s+)?(?:WILL|SHALL)\\s+(?:BE\\s+)?DEDUCT(?:ED)?)[\\s\\S]*?${conditionBoundary}` +
       `|(?:(?:[0-9]{1,2}|[A-Z])[\\.\\)]\\s*)?(?:(?:WE\\s+)?(?:WILL|SHALL)\\s+(?:BE\\s+)?DEDUCT(?:ED)?[\\s\\S]{1,60}?AS\\s+(?:PAYMENT|SETTLEMENT|REIMBURSEMENT)\\s+(?:FEE|CHARGE)[S]?)[\\s\\S]*?${conditionBoundary}` +
       `|(?:(?:AN\\s+AMOUNT\\s+OF\\s+)?(?:USD|EUR|GBP)?\\s*[\\d.]+\\s+AS\\s+(?:DOCUMENT\\s+)?SETTLEMENT[\\s\\S]*?${conditionBoundary})`,
@@ -562,6 +585,31 @@ export function auditLcText(text: string, settings?: UserSettings): LcAuditResul
   const payOnBeneficiary = totalPaymentFeeBeneficiary;
   const totalBeneficiaryCharges = discOnBeneficiary + payOnBeneficiary + cableSwiftTotal;
 
+  // Clause locations for discrepancy & payment
+  const discClauseNum = extractClauseNumber(cleanDiscSnippet);
+  const discLoc = discClauseNum ? `Field 47A, ${discClauseNum}` : (hasDiscrepancyMention ? 'Field 47A' : 'Field 47A (Missing)');
+
+  const primaryPayFee = detectedPaymentFees.find(f => f.payer === 'Beneficiary') || detectedPaymentFees[0];
+  const payClauseNum = primaryPayFee ? extractClauseNumber(primaryPayFee.text) : null;
+  const payLoc = primaryPayFee
+    ? (primaryPayFee.type.includes('71D')
+        ? 'Field 71D'
+        : (primaryPayFee.type.includes('78')
+            ? 'Field 78'
+            : (payClauseNum ? `Field 47A, ${payClauseNum}` : 'Field 47A')))
+    : 'Field 47A (Missing)';
+
+  let combinedLoc = 'Field 47A';
+  if (discClauseNum && payClauseNum) {
+    combinedLoc = `Field 47A (${discClauseNum} & ${payClauseNum})`;
+  } else if (discClauseNum && payLoc.includes('71D')) {
+    combinedLoc = `Field 47A (${discClauseNum}) & Field 71D`;
+  } else if (discClauseNum) {
+    combinedLoc = `Field 47A, ${discClauseNum}`;
+  } else if (payClauseNum) {
+    combinedLoc = `Field 47A, ${payClauseNum}`;
+  }
+
   // Construct Charge Breakdown items (who pays what)
   const breakdownItems: ChargePayerItem[] = [];
 
@@ -572,17 +620,20 @@ export function auditLcText(text: string, settings?: UserSettings): LcAuditResul
       currency: detectedCurrency || 'USD',
       payer: isDiscOnApplicant ? 'Applicant' : 'Beneficiary',
       clauseSnippet: discSnippet,
+      clauseLocation: discLoc,
       isExceeding: !isDiscOnApplicant && discAmt > 25
     });
   }
 
   for (const pf of detectedPaymentFees) {
+    const itemLoc = pf.type.includes('71D') ? 'Field 71D' : (pf.type.includes('78') ? 'Field 78' : resolveClauseLocation('Field 47A', pf.text));
     breakdownItems.push({
       type: pf.type,
       amount: pf.amount,
       currency: detectedCurrency || 'USD',
       payer: pf.payer as 'Beneficiary' | 'Applicant',
       clauseSnippet: pf.text,
+      clauseLocation: itemLoc,
       isExceeding: pf.payer === 'Beneficiary' && pf.amount > 25
     });
   }
@@ -593,6 +644,7 @@ export function auditLcText(text: string, settings?: UserSettings): LcAuditResul
       amount: cableSwiftTotal,
       currency: detectedCurrency || 'USD',
       payer: 'Beneficiary',
+      clauseLocation: 'Field 47A',
       isExceeding: cableSwiftTotal > 50
     });
   }
@@ -610,6 +662,7 @@ export function auditLcText(text: string, settings?: UserSettings): LcAuditResul
       id: 'issue_missing_discrepancy_payment_clauses',
       correctionId: 'discrepancy_payment_charges_revision',
       title: 'Missing Discrepancy & Payment Charge Clauses',
+      clauseLocation: 'Field 47A (Missing Clauses)',
       severity: 'warning',
       reason: 'No clauses are defined in the LC regarding discrepancy handling fees or payment/settlement charges. Please add standard clauses capping discrepancy at max USD 25.00 and payment at max USD 25.00, not exceeding USD 50.00 in total.',
       detectedText: 'No discrepancy or payment charge clause found in LC conditions',
@@ -623,6 +676,7 @@ export function auditLcText(text: string, settings?: UserSettings): LcAuditResul
             currency: detectedCurrency || 'USD',
             payer: 'Beneficiary',
             clauseSnippet: 'No discrepancy clause found in LC conditions',
+            clauseLocation: 'Field 47A (Missing)',
             isExceeding: true
           },
           {
@@ -631,6 +685,7 @@ export function auditLcText(text: string, settings?: UserSettings): LcAuditResul
             currency: detectedCurrency || 'USD',
             payer: 'Beneficiary',
             clauseSnippet: 'No payment/settlement clause found in LC conditions',
+            clauseLocation: 'Field 47A (Missing)',
             isExceeding: true
           }
         ],
@@ -656,6 +711,7 @@ export function auditLcText(text: string, settings?: UserSettings): LcAuditResul
         id: 'issue_combined_charges_revision',
         correctionId: 'discrepancy_payment_charges_revision',
         title: 'Revise Discrepancy & Payment Charges (Combined Exceeds Limits)',
+        clauseLocation: combinedLoc,
         severity: 'warning',
         reason: `Bank charges placed on beneficiary exceed acceptable limits: ${breakdownFull}. Total beneficiary deductions USD ${totalBeneficiaryCharges.toFixed(2)} exceed the ceiling of USD 50.00. Discrepancy must be max USD 25.00, payment max USD 25.00, and combined total max USD 50.00.`,
         detectedText: breakdownFull,
@@ -673,6 +729,7 @@ export function auditLcText(text: string, settings?: UserSettings): LcAuditResul
         id: 'issue_excessive_discrepancy_fee',
         correctionId: 'discrepancy_charges',
         title: `Excessive Discrepancy Fee (USD ${discAmt.toFixed(2)})`,
+        clauseLocation: discLoc,
         severity: 'warning',
         reason: `The discrepancy fee in the LC is USD ${discAmt.toFixed(2)} (${isDiscOnApplicant ? "Applicant's Account" : "Beneficiary's Account"}), which exceeds the standard acceptable limit of USD 25.00.`,
         detectedText: `${discPayerStr} | ${payPayerStr}`,
@@ -690,6 +747,7 @@ export function auditLcText(text: string, settings?: UserSettings): LcAuditResul
         id: 'issue_payment_charges_limit_exceeded',
         correctionId: 'payment_processing_charges',
         title: `Payment / Settlement Charges Exceed USD 25.00 (Total: USD ${totalPaymentFeeBeneficiary.toFixed(2)})`,
+        clauseLocation: payLoc,
         severity: 'warning',
         reason: `Payment/settlement charges in the LC total USD ${totalPaymentFeeBeneficiary.toFixed(2)} (${feesBreakdown}) on beneficiary account, which exceeds the allowable limit of USD 25.00.`,
         detectedText: `${payPayerStr} | ${discPayerStr}`,
@@ -709,6 +767,7 @@ export function auditLcText(text: string, settings?: UserSettings): LcAuditResul
         id: 'issue_excessive_discrepancy_fee',
         correctionId: 'discrepancy_charges',
         title: `Excessive Discrepancy Fee (USD ${discAmt.toFixed(2)})`,
+        clauseLocation: discLoc,
         severity: 'warning',
         reason: `The discrepancy fee in the LC is USD ${discAmt.toFixed(2)} (${isDiscOnApplicant ? "Applicant's Account" : "Beneficiary's Account"}), which exceeds the standard acceptable limit of USD 25.00.`,
         detectedText: discSnippet,
@@ -724,6 +783,7 @@ export function auditLcText(text: string, settings?: UserSettings): LcAuditResul
       id: 'issue_missing_payment_charge_clause',
       correctionId: 'payment_processing_charges',
       title: 'Missing Payment / Settlement Charge Clause',
+      clauseLocation: 'Field 47A (Missing Payment Cap)',
       severity: 'info',
       reason: 'The LC contains a discrepancy fee clause, but does not define any cap for payment/settlement charges. Please specify that payment processing charges shall not exceed USD 25.00.',
       detectedText: 'No payment processing or settlement fee clause found in LC',
@@ -740,6 +800,7 @@ export function auditLcText(text: string, settings?: UserSettings): LcAuditResul
         id: 'issue_payment_charges_limit_exceeded',
         correctionId: 'payment_processing_charges',
         title: `Payment / Settlement Charges Exceed USD 25.00 (Total: USD ${totalPaymentFeeBeneficiary.toFixed(2)})`,
+        clauseLocation: payLoc,
         severity: 'warning',
         reason: `Payment/settlement charges in the LC total USD ${totalPaymentFeeBeneficiary.toFixed(2)} (${feesBreakdown}) on beneficiary account, which exceeds the allowable limit of USD 25.00.`,
         detectedText: payPayerStr,
@@ -754,6 +815,7 @@ export function auditLcText(text: string, settings?: UserSettings): LcAuditResul
       id: 'issue_missing_discrepancy_clause',
       correctionId: 'discrepancy_charges',
       title: 'Missing Discrepancy Fee Clause (Uncapped Risk)',
+      clauseLocation: 'Field 47A (Missing Discrepancy Cap)',
       severity: 'info',
       reason: 'The LC contains a payment charge clause, but does not specify any cap for discrepancy fees. Please specify that discrepancy charges, if any, shall not exceed USD 25.00.',
       detectedText: 'No discrepancy handling fee clause found in LC conditions',
@@ -765,34 +827,45 @@ export function auditLcText(text: string, settings?: UserSettings): LcAuditResul
   }
 
   // ==========================================
-  // RULE 3: Acceptance After Physical Verification / Receipt – Delete
+  // RULE 3: Acceptance After Physical Verification / Receipt / Damage Claims – Delete
   // ==========================================
   const hasPhysicalVerificationMention =
     /PHYSICAL\s*VERIFICATION/i.test(normalizedText) ||
     /VERIFICATION\s+OF\s+GOODS/i.test(normalizedText) ||
     /PHYSICAL\s*RECEIPT/i.test(normalizedText) ||
     /RECEIPT\s+OF\s+GOODS/i.test(normalizedText) ||
+    /GOODS\s+ARE\s+FOUND\s+(?:DAMAGED|DEFECTIVE)/i.test(normalizedText) ||
+    /DEBIT\s+NOTE\s+ISSUED\s+BY\s+(?:THE\s+)?BUYER/i.test(normalizedText) ||
     (/CUSTOMS\s+CLEARANCE/i.test(normalizedText) && /ACCEPTANCE/i.test(normalizedText));
 
   if (hasPhysicalVerificationMention) {
     const isPhysicalVerif = /PHYSICAL\s*VERIFICATION|VERIFICATION\s+OF\s+GOODS/i.test(normalizedText);
-    const pvClauseMatch = normalizedText.match(/(?:(?:\n|\.|;|^)\s*(?:CLAUSE\s+)?([0-9]{1,2}|[A-Z])[\.\)]\s*)([^\n\.;]*?(?:PHYSICAL\s*VERIFICATION|VERIFICATION\s+OF\s+GOODS|PHYSICAL\s*RECEIPT|RECEIPT\s+OF\s+GOODS)[^\n\.;]*)/i);
+    const pvClauseMatch = normalizedText.match(/(?:(?:\n|\.|;|^)\s*(?:CLAUSE\s+)?([0-9]{1,2}|[A-Z])[\.\)]\s*)([^\n\.;]*?(?:PHYSICAL\s*VERIFICATION|VERIFICATION\s+OF\s+GOODS|PHYSICAL\s*RECEIPT|RECEIPT\s+OF\s+GOODS|GOODS\s+ARE\s+FOUND\s+(?:DAMAGED|DEFECTIVE)|DEBIT\s+NOTE\s+ISSUED\s+BY\s+(?:THE\s+)?BUYER)[^\n\.;]*)/i);
     const detectedClauseNumber = pvClauseMatch && pvClauseMatch[1] ? `Clause ${pvClauseMatch[1].trim()}` : '';
 
     const snippet = pvClauseMatch
       ? pvClauseMatch[0].trim().replace(/\s+/g, ' ')
-      : extractSnippet(normalizedText, /(?:ACCEPTANCE[\s\S]{0,60}?PHYSICAL\s*VERIFICATION[\s\S]{0,60}?(?:\.|$)|PHYSICAL\s*VERIFICATION[\s\S]{0,60}?(?:\.|$)|ACCEPTANCE\s+WILL\s+BE\s+GIVEN\s+AFTER[\s\S]{0,60}?(?:\.|$)|PHYSICAL\s*RECEIPT[\s\S]{0,60}?(?:\.|$)|RECEIPT\s*OF\s*GOODS[\s\S]{0,60}?(?:\.|$))/i);
+      : extractSnippet(normalizedText, /(?:ACCEPTANCE[\s\S]{0,60}?PHYSICAL\s*VERIFICATION[\s\S]{0,60}?(?:\.|$)|PHYSICAL\s*VERIFICATION[\s\S]{0,60}?(?:\.|$)|ACCEPTANCE\s+WILL\s+BE\s+GIVEN\s+AFTER[\s\S]{0,60}?(?:\.|$)|PHYSICAL\s*RECEIPT[\s\S]{0,60}?(?:\.|$)|RECEIPT\s*OF\s*GOODS[\s\S]{0,60}?(?:\.|$)|GOODS\s+ARE\s+FOUND\s+DAMAGED[^\n.]{0,100})/i);
+
+    const isQualityOrDamageClaim = /DAMAGED|DEFECTIVE|DEBIT\s+NOTE/i.test(snippet || '');
 
     issues.push({
       id: 'issue_physical_verification_clause',
       correctionId: 'physical_verification_clause',
       title: detectedClauseNumber
-        ? `${detectedClauseNumber} – Physical Verification of Goods (Delete)`
-        : (isPhysicalVerif
+        ? (isQualityOrDamageClaim
+            ? `${detectedClauseNumber} – Quality Claim / Debit Note Deduction (Delete)`
+            : `${detectedClauseNumber} – Physical Verification of Goods (Delete)`)
+        : (isQualityOrDamageClaim
+            ? 'Quality Claim / Debit Note Deduction Clause (Violates UCP 600)'
+            : isPhysicalVerif
             ? 'Physical Verification of Goods Clause – Delete (Violates UCP 600)'
             : 'Acceptance After Physical Receipt Clause (Violates UCP 600)'),
+      clauseLocation: detectedClauseNumber ? `Field 47A, ${detectedClauseNumber}` : 'Field 47A',
       severity: 'critical',
-      reason: isPhysicalVerif
+      reason: isQualityOrDamageClaim
+        ? `LC payment or acceptance cannot be made subject to buyer damage claims, discounts, or debit notes${detectedClauseNumber ? ` (${detectedClauseNumber})` : ''}. In accordance with UCP 600, letters of credit deal exclusively with documents; quality claims or commercial disputes must be handled outside the documentary credit.`
+        : isPhysicalVerif
         ? `Bill acceptance or payment cannot be made conditional upon physical verification of goods${detectedClauseNumber ? ` (${detectedClauseNumber})` : ''}. In accordance with UCP 600, banks deal with documents and not goods; acceptance must be strictly issued against compliant shipping documents.`
         : `Bill acceptance cannot be made conditional upon physical arrival or inspection of goods${detectedClauseNumber ? ` (${detectedClauseNumber})` : ''}. Under UCP 600, payment/acceptance must be strictly against compliant documents.`,
       detectedText: snippet || (isPhysicalVerif ? 'Acceptance conditional upon physical verification of goods' : 'Acceptance after physical receipt of goods'),
@@ -815,6 +888,7 @@ export function auditLcText(text: string, settings?: UserSettings): LcAuditResul
       id: 'issue_bank_verification_report',
       correctionId: 'bank_verification_report_deletion',
       title: 'Bank Verification Report Clause – Delete',
+      clauseLocation: resolveClauseLocation('Field 47A', snippet),
       severity: 'warning',
       reason: 'Clauses mandating an inspection or verification report signed by applicant bank officials introduce serious document negotiation delays.',
       detectedText: snippet
@@ -836,6 +910,7 @@ export function auditLcText(text: string, settings?: UserSettings): LcAuditResul
       id: 'issue_applicant_certificate',
       correctionId: 'physical_verification_clause',
       title: 'Applicant Inspection Certificate Removal',
+      clauseLocation: resolveClauseLocation('Field 47A', snippet),
       severity: 'critical',
       reason: 'Requiring an inspection certificate signed by the buyer/applicant allows the buyer to withhold approval and block payment at will.',
       detectedText: snippet
@@ -853,6 +928,7 @@ export function auditLcText(text: string, settings?: UserSettings): LcAuditResul
         id: 'issue_presentation_period',
         correctionId: 'other_correction',
         title: `Short Presentation Period (${days} Days)`,
+        clauseLocation: 'Field 48',
         severity: 'warning',
         reason: `The presentation period (Field 48) is set to only ${days} days from transport document date. Standard banking and courier clearance requires at least 15 to 21 days.`,
         detectedText: `Period for presentation: ${days} days`,
@@ -881,6 +957,7 @@ export function auditLcText(text: string, settings?: UserSettings): LcAuditResul
           id: 'issue_shipment_date_passed',
           correctionId: 'shipment_date_extension',
           title: 'Latest Shipment Date is in the Past / Expired',
+          clauseLocation: 'Field 44C',
           severity: 'critical',
           reason: `The latest shipment date (${detectedShipmentDate}) has already passed or is earlier than the LC issue date (${detectedIssueDate || 'today'}). Shipment is impossible without an immediate extension.`,
           detectedText: `Latest Date of Shipment: ${detectedShipmentDate}`,
@@ -901,6 +978,7 @@ export function auditLcText(text: string, settings?: UserSettings): LcAuditResul
               id: 'issue_expiry_gap',
               correctionId: 'expiry_date_extension',
               title: `Insufficient Expiry Gap (${diffDays} Days After Shipment)`,
+              clauseLocation: 'Field 44C & Field 31D',
               severity: 'critical',
               reason: `LC expires only ${diffDays} days after shipment date (${detectedShipmentDate}). Expiry date should be at least 15-21 days after shipment date.`,
               detectedText: `Shipment: ${detectedShipmentDate}, Expiry: ${detectedExpiryDate}`,
@@ -928,6 +1006,7 @@ export function auditLcText(text: string, settings?: UserSettings): LcAuditResul
       id: 'issue_fund_transfer_charges',
       correctionId: 'fund_transfer_charges',
       title: 'Fund Transfer Charges Deducted at Payment Time',
+      clauseLocation: resolveClauseLocation('Field 47A', fundSnippet),
       severity: 'warning',
       reason: 'The LC mentions deducting fund transfer charges from payment proceeds. Fund transfer / remittance charges must be capped or borne by the applicant.',
       detectedText: fundSnippet || 'Deducted fund transfer charges at the time of payment.'
@@ -955,6 +1034,7 @@ export function auditLcText(text: string, settings?: UserSettings): LcAuditResul
         id: 'issue_draft_tenor_delivery',
         correctionId: 'draft_tenor_correction',
         title: 'Risky Draft Tenor (Counted From Date of Delivery)',
+        clauseLocation: 'Field 42C',
         severity: 'critical',
         reason: `LC draft tenor states: "${tenorText}". Tenor counted from delivery date violates UCP 600 standards. It must be amended to standard "from the date of acceptance" or "from bill of exchange date".`,
         detectedText: `Drafts at: ${tenorText}`,
@@ -1013,6 +1093,7 @@ export function auditLcText(text: string, settings?: UserSettings): LcAuditResul
       id: 'issue_missing_overdue_clause',
       correctionId: 'overdue_clause',
       title: 'Missing Overdue Interest Clause (Deferred Usance LC)',
+      clauseLocation: 'Field 47A (Missing Overdue Clause)',
       severity: 'warning',
       reason: 'This LC has a deferred usance tenor, but does not contain any overdue interest clause. If the buyer or issuing bank delays payment beyond maturity, no overdue interest penalty can be claimed without this clause.',
       detectedText: 'Deferred tenor detected (No overdue interest clause found in LC conditions)'
@@ -1027,6 +1108,7 @@ export function auditLcText(text: string, settings?: UserSettings): LcAuditResul
       id: 'issue_benchmark_interest_review',
       correctionId: 'payment_clause',
       title: 'Interest Rate Benchmark Alert (SOFR / LIBOR Clause Detected)',
+      clauseLocation: resolveClauseLocation('Field 47A', interestSnippet),
       severity: 'info',
       reason: 'The LC specifies interest payment tied to SOFR / LIBOR. Please verify with your agreed Proforma Invoice (PI) whether the interest rate, spread, and payer (Applicant vs Beneficiary) match your agreed commercial terms.',
       detectedText: interestSnippet || 'Interest benchmark (SOFR/LIBOR) detected in LC.'
@@ -1070,6 +1152,7 @@ export function auditLcText(text: string, settings?: UserSettings): LcAuditResul
       id: 'issue_missing_payment_clause',
       correctionId: 'payment_clause',
       title: 'Missing Payment Clause in LC',
+      clauseLocation: 'Field 78 (Missing Payment Instruction)',
       severity: 'warning',
       reason: 'The LC does not contain a clear payment instruction or settlement clause (e.g. Field 78) specifying how and when payment will be remitted to the negotiating/presenting bank.',
       detectedText: 'No payment instruction or remittance clause found in LC conditions'
@@ -1092,6 +1175,7 @@ export function auditLcText(text: string, settings?: UserSettings): LcAuditResul
       id: 'issue_partial_payment_not_allowed',
       correctionId: 'partial_payment_not_allowed',
       title: 'Partial Payment / Drawing Not Allowed (Restricted)',
+      clauseLocation: resolveClauseLocation('Field 47A', partialSnippet),
       severity: 'warning',
       reason: 'The LC restricts partial payments or partial drawings (or mandates documents in one single lot). In commercial export shipments, partial drawings must be allowed against partial deliveries.',
       detectedText: partialSnippet || 'Partial payment or partial drawing is restricted in the LC.',
@@ -1120,6 +1204,7 @@ export function auditLcText(text: string, settings?: UserSettings): LcAuditResul
         id: 'issue_beneficiary_name',
         correctionId: 'beneficiary_name_correction',
         title: 'Beneficiary Legal Name Discrepancy',
+        clauseLocation: 'Field 59',
         severity: 'warning',
         reason: `Beneficiary name detected in Field 59 does not seem to match your company profile: "${settings.companyName}".`,
         detectedText: detectedBeneficiary.split(',')[0].trim(),

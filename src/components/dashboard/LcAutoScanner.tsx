@@ -15,7 +15,8 @@ import {
   X,
   User,
   Building2,
-  Coins
+  Coins,
+  Bookmark
 } from 'lucide-react';
 import type { LcAuditResult, UserSettings, AdditionalDetails } from '../../types';
 import { extractTextFromPdf, auditLcText } from '../../services/lcParserService';
@@ -428,7 +429,7 @@ export const LcAutoScanner: React.FC<LcAutoScannerProps> = ({
                           </div>
 
                           <div className="flex-1 space-y-1">
-                            <div className="flex items-center space-x-2">
+                            <div className="flex items-center space-x-2 flex-wrap gap-y-1">
                               {issue.severity === 'critical' && (
                                 <span className="inline-flex items-center rounded-md bg-rose-100 px-1.5 py-0.5 text-[10px] font-bold text-rose-700">
                                   <AlertTriangle className="h-3 w-3 mr-0.5" /> High Risk
@@ -442,6 +443,12 @@ export const LcAutoScanner: React.FC<LcAutoScannerProps> = ({
                               {issue.severity === 'info' && (
                                 <span className="inline-flex items-center rounded-md bg-blue-100 px-1.5 py-0.5 text-[10px] font-bold text-blue-700">
                                   Advisory
+                                </span>
+                              )}
+                              {issue.clauseLocation && (
+                                <span className="inline-flex items-center rounded-md bg-indigo-50 border border-indigo-200 px-2 py-0.5 text-[10.5px] font-bold text-indigo-700 shadow-2xs">
+                                  <Bookmark className="h-3 w-3 mr-1 text-indigo-500" />
+                                  {issue.clauseLocation}
                                 </span>
                               )}
                               <h4 className="text-xs font-bold text-slate-900">
@@ -494,6 +501,11 @@ export const LcAutoScanner: React.FC<LcAutoScannerProps> = ({
                                         <div className="flex items-center justify-between">
                                           <div className="flex items-center space-x-1.5 flex-wrap gap-y-1">
                                             <span className="font-bold text-slate-900">{item.type}</span>
+                                            {item.clauseLocation && (
+                                              <span className="inline-flex items-center rounded bg-indigo-50 px-1.5 py-0.2 text-[10px] font-bold text-indigo-700 border border-indigo-200">
+                                                📍 {item.clauseLocation}
+                                              </span>
+                                            )}
                                             <span
                                               className={`inline-flex items-center rounded px-1.5 py-0.2 text-[10px] font-bold ${
                                                 isBene
@@ -532,9 +544,16 @@ export const LcAutoScanner: React.FC<LcAutoScannerProps> = ({
 
                             {issue.detectedText && (
                               <div className="rounded-md bg-slate-50 px-2.5 py-1.5 text-[11px] font-mono text-slate-700 border border-slate-200 mt-2">
-                                <span className="font-semibold text-slate-500 font-sans text-[10px] uppercase tracking-wide mr-1.5">
-                                  LC Snippet:
-                                </span>
+                                <div className="flex items-center justify-between gap-1 mb-1 font-sans">
+                                  <span className="font-semibold text-slate-500 text-[10px] uppercase tracking-wide">
+                                    LC Snippet:
+                                  </span>
+                                  {issue.clauseLocation && (
+                                    <span className="font-bold text-[10px] text-indigo-700 bg-indigo-50 px-1.5 py-0.2 rounded border border-indigo-200 font-sans">
+                                      📍 {issue.clauseLocation}
+                                    </span>
+                                  )}
+                                </div>
                                 {highlightSnippetText(issue.detectedText)}
                               </div>
                             )}
