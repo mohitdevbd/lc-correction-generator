@@ -258,7 +258,7 @@ export function auditLcText(text: string, settings?: UserSettings): LcAuditResul
   // ==========================================
   // RULE 1: Field 71D – Genuinely Problematic Charges on Beneficiary
   // ==========================================
-  const chargesMatch = normalizedText.match(/(?::71D:|:71B:|F71D:[^\n]*Charges|(?:\b|\n)\s*71D\s*:\s*(?:CHARGES)?)[ \t]*(?:Charges[ \t]*)?[:#]?\s*([\s\S]{1,400}?)(?=(?:\n:[0-9]{2}|\s+:[0-9]{2}:|\nF[0-9]{2}|\n\s*[0-9]{2}[A-Z]?\s*:|\s+[0-9]{2}[A-Z]?\s*:|$))/i);
+  const chargesMatch = normalizedText.match(/(?::71D:|:71B:|(?:\b|\n|\s+)F71D:[^\n]*Charges|(?:\b|\n|\s+)F71D\s*:\s*(?:CHARGES)?|(?:\b|\n)\s*71D\s*:\s*(?:CHARGES)?)[ \t]*(?:Charges[ \t]*)?[:#]?\s*([\s\S]{1,400}?)(?=(?:\n:[0-9]{2}|\s+:[0-9]{2}:|(?:\n|\s+)F[0-9]{2}|\n\s*[0-9]{2}[A-Z]?\s*:|\s+[0-9]{2}[A-Z]?\s*:|$))/i);
   const chargesBlock = chargesMatch ? chargesMatch[1].toUpperCase() : '';
 
   if (chargesBlock) {
@@ -282,6 +282,8 @@ export function auditLcText(text: string, settings?: UserSettings): LcAuditResul
       chargesBlock.includes("ON BENEFICIARY'S ACCOUNT") ||
       chargesBlock.includes('ON BENEFICIARY ACCOUNT') ||
       chargesBlock.includes('ARE ON BENEFICIARY') ||
+      chargesBlock.includes('BE ON BENEFICIARY') ||
+      chargesBlock.includes('WILL BE ON BENEFICIARY') ||
       chargesBlock.includes('BORNE BY BENEFICIARY');
 
     const hasReimbursementOnBeneficiary =
@@ -318,7 +320,7 @@ export function auditLcText(text: string, settings?: UserSettings): LcAuditResul
   // ==========================================
   // Exclude Field 71D so Tag 71D banking charges are audited completely separately from Tag 47A / conditions
   const textWithout71D = normalizedText.replace(
-    /(?::71D:|:71B:|F71D:[^\n]*Charges|(?:\b|\n)\s*71D\s*:\s*(?:CHARGES)?)[ \t]*(?:Charges[ \t]*)?[:#]?[\s\S]*?(?=(?:\n:[0-9]{2}|\s+:[0-9]{2}:|\nF[0-9]{2}|\n\s*[0-9]{2}[A-Z]?\s*:|\s+[0-9]{2}[A-Z]?\s*:|$))/i,
+    /(?::71D:|:71B:|(?:\b|\n|\s+)F71D:[^\n]*Charges|(?:\b|\n|\s+)F71D\s*:\s*(?:CHARGES)?|(?:\b|\n)\s*71D\s*:\s*(?:CHARGES)?)[ \t]*(?:Charges[ \t]*)?[:#]?[\s\S]*?(?=(?:\n:[0-9]{2}|\s+:[0-9]{2}:|(?:\n|\s+)F[0-9]{2}|\n\s*[0-9]{2}[A-Z]?\s*:|\s+[0-9]{2}[A-Z]?\s*:|$))/i,
     ''
   );
   const numericLcAmount = detectedAmount ? parseFloat(detectedAmount.replace(/,/g, '')) : 0;
@@ -924,10 +926,14 @@ export function auditLcText(text: string, settings?: UserSettings): LcAuditResul
   const relevantLcBody = normalizedText.replace(/Delivery\s*overdue\s*warning\s*request/gi, '');
   const upperBody = relevantLcBody.toUpperCase();
 
-  const hasOverdueClause = upperBody.includes('OVERDUE INTEREST') ||
-                           upperBody.includes('OVERDUE CHARGE') ||
-                           upperBody.includes('OVERDUE CLAUSE') ||
-                           (upperBody.includes('OVERDUE') && (upperBody.includes('RATE') || upperBody.includes('PAY') || upperBody.includes('MATURITY')));
+  const hasOverdueClause =
+    /OVER\s*DUE\s*(?:INTEREST|CHARGE|CLAUSE|RATE|COMMISSION)/i.test(relevantLcBody) ||
+    /OVER\s*DUE[\s\S]{0,30}?\d+(?:\.\d+)?%/i.test(relevantLcBody) ||
+    /OVER\s*DUE[\s\S]{0,50}?(?:MATURITY|PER\s+ANNUM|P\.A\.|ACCEPTANCE)/i.test(relevantLcBody) ||
+    /(?:DELAYED\s+PAYMENT|LATE\s+PAYMENT)\s+INTEREST/i.test(relevantLcBody) ||
+    /INTEREST\s+(?:FOR|ON)\s+DELAYED\s+PAYMENT/i.test(relevantLcBody) ||
+    /INTEREST\s+BEYOND\s+MATURITY/i.test(relevantLcBody) ||
+    (upperBody.includes('OVERDUE') && (upperBody.includes('RATE') || upperBody.includes('PAY') || upperBody.includes('MATURITY')));
 
   // Check for benchmark interest terms like SOFR / LIBOR
   const hasBenchmarkInterest = upperBody.includes('SOFR') ||
