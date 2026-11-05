@@ -268,7 +268,7 @@ export function auditLcText(text: string, settings?: UserSettings): LcAuditResul
   //    a) Issuing bank places charges inside their country / inside counter on Beneficiary.
   //    b) Unauthorized fees (e.g. Confirmation, Advising, Amendment, Courier) are placed on Beneficiary.
   const chargesMatch = normalizedText.match(/(?::71D:|:71B:|(?:\b|\n|\s+)F71D:[^\n]*Charges|(?:\b|\n|\s+)F71D\s*:\s*(?:CHARGES)?|(?:\b|\n)\s*71D\s*:\s*(?:CHARGES)?)[ \t]*(?:Charges[ \t]*)?[:#]?\s*([\s\S]{1,400}?)(?=(?:\n:[0-9]{2}|\s+:[0-9]{2}:|(?:\n|\s+)F[0-9]{2}|\n\s*[0-9]{2}[A-Z]?\s*:|\s+[0-9]{2}[A-Z]?\s*:|$))/i);
-  const chargesBlock = chargesMatch ? chargesMatch[1].toUpperCase() : '';
+  const chargesBlock = chargesMatch ? chargesMatch[1].toUpperCase().replace(/\s+/g, ' ') : '';
 
   if (chargesBlock) {
     const hasBeneficiaryCharge =
