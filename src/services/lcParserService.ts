@@ -212,20 +212,49 @@ function parseTieredFee(clauseText: string, lcAmount: number): { lowerFee: numbe
   return null;
 }
 
-function extractClauseNumber(snippet?: string): string | null {
+function extractClauseNumber(snippet?: string, parentText?: string): string | null {
   if (!snippet) return null;
   const trimmed = snippet.trim();
-  const m = trimmed.match(/^(?:Clause\s*)?([0-9]{1,2}|[A-Z])[\.\)]/i) ||
-            trimmed.match(/(?:^|\n|\b)(?:Clause\s*)?([0-9]{1,2}|[A-Z])[\.\)]\s*[A-Z]/i);
-  if (m) {
-    const raw = m[1];
-    return isNaN(Number(raw)) ? `Clause ${raw}` : `Clause ${raw.padStart(2, '0')}`;
+
+  // First check if snippet itself starts with e.g. 05. or 05(B)
+  const mParentAndSub = trimmed.match(/^(?:Clause\s*)?([0-9]{1,2})\s*[\.\)]\s*(?:[A-Z\s]{0,20}:?\s*)?\(?([A-Z])[\.\)]?/i);
+  if (mParentAndSub) {
+    const p = mParentAndSub[1].padStart(2, '0');
+    const sub = mParentAndSub[2];
+    return `Clause ${p}(${sub})`;
   }
+
+  // Check subclause (A), (B), (C) or sub-letter
+  const mSub = trimmed.match(/^(?:Clause\s*)?\(?([A-Z])[\.\)]/i) ||
+               trimmed.match(/(?:^|\n|\b|\()(?:Clause\s*)?([A-Z])[\.\)]/i);
+  if (mSub) {
+    const sub = mSub[1];
+    if (parentText) {
+      const idx = parentText.indexOf(trimmed.substring(0, Math.min(30, trimmed.length)));
+      if (idx !== -1) {
+        const lookBack = parentText.substring(Math.max(0, idx - 1200), idx);
+        const parentMatches = [...lookBack.matchAll(/(?:^|\n|\.\s+)([0-9]{1,2})\s*\.\s*(?:[A-Z]{3,}|CHARGES)/gi)];
+        if (parentMatches.length > 0) {
+          const lastNum = parentMatches[parentMatches.length - 1][1];
+          return `Clause ${lastNum.padStart(2, '0')}(${sub})`;
+        }
+      }
+    }
+    return `Clause ${sub}`;
+  }
+
+  // Check numbered clause 03., 14), etc.
+  const mNum = trimmed.match(/^(?:Clause\s*)?\(?([0-9]{1,2})[\.\)]/i) ||
+               trimmed.match(/(?:^|\n|\b|\()(?:Clause\s*)?([0-9]{1,2})[\.\)]\s*[A-Z]/i);
+  if (mNum) {
+    return `Clause ${mNum[1].padStart(2, '0')}`;
+  }
+
   return null;
 }
 
-function resolveClauseLocation(defaultField: string, snippet?: string): string {
-  const num = extractClauseNumber(snippet);
+function resolveClauseLocation(defaultField: string, snippet?: string, parentText?: string): string {
+  const num = extractClauseNumber(snippet, parentText);
   if (num) {
     return `${defaultField}, ${num}`;
   }
@@ -401,13 +430,14 @@ export function auditLcText(text: string, settings?: UserSettings): LcAuditResul
   let discSnippet = '';
 
   // Top-level condition boundary: stops before next numbered (e.g. 1. or 4) or 10.) or lettered (e.g. A. or G.) condition, or bullet (+), or SWIFT tag (:XX:, FXX:, 71D:, 78:), or ALL CHARGES
-  const conditionBoundary = '(?=(?:(?:\\n|\\.|;|:)\\s*(?:[0-9]{1,2}[\\.\\)]|\\b[A-Z][\\.\\)]|\\+)\\s+[A-Z]|\\n\\s*:[0-9]{2}[A-Z]?:|\\s+:[0-9]{2}[A-Z]?:|\\n\\s*F[0-9]{2}[A-Z]?:|\\n\\s*[0-9]{2}[A-Z]?\\s*:|\\s+[0-9]{2}[A-Z]?\\s*:|\\bALL\\s+(?:BANKING|BANK)?\\s*CHARGES|$))';
+  const conditionBoundary = '(?=(?:(?:\\n|\\.|;|:)\\s*(?:\\([A-Z0-9]{1,2}\\)|[0-9]{1,2}[\\.\\)]|\\b[A-Z][\\.\\)]|\\+)\\s*[A-Z]|\\n\\s*:[0-9]{2}[A-Z]?:|\\s+:[0-9]{2}[A-Z]?:|\\n\\s*F[0-9]{2}[A-Z]?:|\\n\\s*[0-9]{2}[A-Z]?\\s*:|\\s+[0-9]{2}[A-Z]?\\s*:|\\bALL\\s+(?:BANKING|BANK)?\\s*CHARGES|$))';
+  const clausePrefix = '(?:(?:\\([A-Z0-9]{1,2}\\)|[0-9]{1,2}[\\.\\)]|[A-Z][\\.\\)])\\s*)?';
 
   const discRegex = new RegExp(
     `(?:` +
-      `(?:(?:[0-9]{1,2}|[A-Z])[\\.\\)]|\\+)?\\s*(?:A\\s+)?(?:FEE|CHARGE|COST|COMMISSION|EXPENSE|AN?\\s+AMOUNT)\\s+(?:OF\\s+)?(?:USD|EUR|GBP)?\\s*\\d+[\\s\\S]*?DISCREPA[A-Z]*[\\s\\S]*?${conditionBoundary}` +
-      `|(?:(?:[0-9]{1,2}|[A-Z])[\\.\\)]|\\+)?\\s*(?:(?:A\\s+)?(?:IN\\s+CASE\\s+OF\\s+)?DISCREPA[A-Z]*\\s*(?:FEE|CHARGE|COMMISSION|COST|DOCUMENTS?)?)[\\s\\S]*?${conditionBoundary}` +
-      `|(?:(?:[0-9]{1,2}|[A-Z])[\\.\\)]|\\+)?\\s*(?:(?:WE\\s+)?(?:WILL|SHALL)\\s+(?:BE\\s+)?DEDUCT(?:ED)?)[\\s\\S]*?DISCREPA[A-Z]*[\\s\\S]*?${conditionBoundary}` +
+      `${clausePrefix}\\s*(?:A\\s+)?(?:FEE|CHARGE|COST|COMMISSION|EXPENSE|AN?\\s+AMOUNT)\\s+(?:OF\\s+)?(?:USD|EUR|GBP)?\\s*\\d+[\\s\\S]*?DISCREPA[A-Z]*[\\s\\S]*?${conditionBoundary}` +
+      `|${clausePrefix}\\s*(?:(?:A\\s+)?(?:IN\\s+CASE\\s+OF\\s+)?DISCREPA[A-Z]*\\s*(?:FEE|CHARGE|COMMISSION|COST|DOCUMENTS?)?)[\\s\\S]*?${conditionBoundary}` +
+      `|${clausePrefix}\\s*(?:(?:WE\\s+)?(?:WILL|SHALL)\\s+(?:BE\\s+)?DEDUCT(?:ED)?)[\\s\\S]*?DISCREPA[A-Z]*[\\s\\S]*?${conditionBoundary}` +
     `)`,
     'i'
   );
@@ -460,8 +490,62 @@ export function auditLcText(text: string, settings?: UserSettings): LcAuditResul
       !upperDiscSnippet.includes("BENEFICIARY");
   }
 
+  // 1B. EXPIRED L/C PRESENTATION FEE AUDIT:
+  let expiredLcAmt = 0;
+  let hasExpiredLcMention = false;
+  let isExpiredLcOnApplicant = false;
+  let cleanExpiredLcSnippet = '';
+  let expiredLcSnippet = '';
+
+  const expiredLcRegex = new RegExp(
+    `(?:` +
+      `${clausePrefix}(?:IN\\s+ADDITION\\s+TO\\s+(?:A\\s+)?DISCREPANCY\\s+FEE[\\s,]+)(?:A\\s+)?FEE\\s+(?:OF\\s+)?(?:USD|EUR|GBP)?\\s*\\d+(?:\\.\\d{2})?[\\s\\S]*?${conditionBoundary}` +
+      `|${clausePrefix}(?:(?:EXPIRED\\s+(?:L\\/?C|CREDIT)|PRESENTATION\\s+UNDER\\s+EXPIRED\\s+(?:L\\/?C|CREDIT)|LATE\\s+PRESENTATION)[\\s\\S]{0,100}?(?:FEE|CHARGE|COST|COMMISSION|EXPENSE|DEDUCT(?:ED)?)[\\s\\S]*?${conditionBoundary})` +
+      `|${clausePrefix}(?:A\\s+)?(?:FEE|CHARGE|COST)\\s+(?:OF\\s+)?(?:USD|EUR|GBP)?\\s*\\d+(?:\\.\\d{2})?[\\s\\S]{0,120}?(?:PRESENTATION\\s+UNDER\\s+EXPIRED|UNDER\\s+EXPIRED\\s+(?:L\\/?C|CREDIT))[\\s\\S]*?${conditionBoundary}` +
+    `)`,
+    'i'
+  );
+
+  const expMatch = textWithout71D.match(expiredLcRegex);
+  if (expMatch) {
+    hasExpiredLcMention = true;
+    cleanExpiredLcSnippet = expMatch[0].trim();
+    expiredLcSnippet = cleanExpiredLcSnippet.replace(/\s+/g, ' ');
+    const amtM = cleanExpiredLcSnippet.match(/(?:(?:USD|EUR|GBP)\s*(\d+(?:\.\d{2})?)|(?:CHARGE|FEE|COMMISSION|COST|DEDUCT(?:ED)?|OF|AT)\s+(?:USD|EUR|GBP)?\s*(\d+(?:\.\d{2})?)|(\d+(?:\.\d{2})?)\s*(?:USD|EUR|GBP))\b/i);
+    if (amtM) expiredLcAmt = parseFloat(amtM[1] || amtM[2] || amtM[3]);
+
+    const upperExpSnippet = cleanExpiredLcSnippet.toUpperCase();
+    isExpiredLcOnApplicant =
+      (upperExpSnippet.includes("APPLICANT'S ACCOUNT") ||
+       upperExpSnippet.includes("APPLICANTS ACCOUNT") ||
+       upperExpSnippet.includes("APPLICANT ACCOUNT") ||
+       upperExpSnippet.includes("FOR APPLICANT") ||
+       upperExpSnippet.includes("FROM APPLICANT") ||
+       upperExpSnippet.includes("BORNE BY APPLICANT") ||
+       upperExpSnippet.includes("BUYER'S ACCOUNT") ||
+       upperExpSnippet.includes("BUYERS ACCOUNT") ||
+       upperExpSnippet.includes("BUYER ACCOUNT")) &&
+      !upperExpSnippet.includes("BENEFICIARY");
+  } else {
+    const expIdx = textWithout71D.search(/PRESENTATION\s+UNDER\s+EXPIRED|EXPIRED\s+(?:L\/?C|CREDIT)/i);
+    if (expIdx !== -1) {
+      const surrounding = textWithout71D.substring(Math.max(0, expIdx - 150), expIdx + 250);
+      if (/(?:FEE|CHARGE|COST|COMMISSION|DEDUCT)/i.test(surrounding)) {
+        const amtM = surrounding.match(/(?:(?:USD|EUR|GBP)\s*(\d+(?:\.\d{2})?)|(?:CHARGE|FEE|COMMISSION|COST|DEDUCT(?:ED)?|OF|AT)\s+(?:USD|EUR|GBP)?\s*(\d+(?:\.\d{2})?)|(\d+(?:\.\d{2})?)\s*(?:USD|EUR|GBP))\b/i);
+        if (amtM) {
+          hasExpiredLcMention = true;
+          expiredLcAmt = parseFloat(amtM[1] || amtM[2] || amtM[3]);
+          cleanExpiredLcSnippet = surrounding.trim();
+          expiredLcSnippet = cleanExpiredLcSnippet.replace(/\s+/g, ' ');
+          const upperExp = cleanExpiredLcSnippet.toUpperCase();
+          isExpiredLcOnApplicant = (upperExp.includes("APPLICANT") || upperExp.includes("BUYER")) && !upperExp.includes("BENEFICIARY");
+        }
+      }
+    }
+  }
+
   // 2. PAYMENT / REIMBURSEMENT / SETTLEMENT / FUND TRANSFER / RTGS CHARGES AUDIT:
-  const paymentFeeRegex = /(?:PAYMENT|REIMBURSEMENT|SETTLEMENT|DOCUMENT\s*SETTLEMENT|FUND\s*TRANSFER|RTGS)[\s\S]{0,40}?(?:CHARGE|COMMISSION|FEE|COST|EXPENSE|OF\s+USD|AT\s+USD|ATTRACT)/i;
+  const paymentFeeRegex = /(?:PAYMENT|REIMBURSEMENT|SETTLEMENT|DOCUMENT\s*SETTLEMENT|FUND\s*TRANSFER|RTGS|L\/?C\s*PAYMENT)[\s\S]{0,40}?(?:CHARGE|COMMISSION|FEE|COST|EXPENSE|OF\s+USD|AT\s+USD|ATTRACT)/i;
   const paymentDeductRegex = /(?:(?:WE\s+)?(?:WILL|SHALL)\s+BE\s+DEDUCTED|WE\s+WILL\s+DEDUCT|DEDUCTED\s+FROM\s+(?:THE\s+)?BILL\s+VALUE)[\s\S]{1,60}?(?:AT\s+THE\s+TIME\s+OF\s+PAYMENT|PAYMENT)/i;
   const docSettlementRegex = /(?:AN\s+AMOUNT\s+OF\s+)?(?:USD|EUR|GBP)?\s*[\d.]+\s+AS\s+(?:DOCUMENT\s+)?SETTLEMENT/i;
   const hasAnyPaymentFeeMention = paymentFeeRegex.test(textWithout71D) ||
@@ -476,16 +560,16 @@ export function auditLcText(text: string, settings?: UserSettings): LcAuditResul
 
   if (hasAnyPaymentFeeMention) {
     const paymentRegexGlobal = new RegExp(
-      `(?:(?:[0-9]{1,2}|[A-Z])[\\.\\)]\\s*)?(?:(?:EACH\\s+)?(?:PAYMENT|SETTLEMENT|REIMBURSEMENT|DOCUMENT\\s*SETTLEMENT|FUND\\s*TRANSFER|RTGS)[\\s\\S]{0,40}?(?:CHARGE|COMMISSION|FEE|COST|EXPENSE|ATTRACT)[S]?[\\s\\S]*?${conditionBoundary})` +
-      `|(?:(?:[0-9]{1,2}|[A-Z])[\\.\\)]\\s*)?(?:AT\\s+THE\\s+TIME\\s+OF\\s+PAYMENT[\\s\\S]{1,60}?(?:WE\\s+)?(?:WILL|SHALL)\\s+(?:BE\\s+)?DEDUCT(?:ED)?)[\\s\\S]*?${conditionBoundary}` +
-      `|(?:(?:[0-9]{1,2}|[A-Z])[\\.\\)]\\s*)?(?:(?:WE\\s+)?(?:WILL|SHALL)\\s+(?:BE\\s+)?DEDUCT(?:ED)?[\\s\\S]{1,60}?AS\\s+(?:PAYMENT|SETTLEMENT|REIMBURSEMENT)\\s+(?:FEE|CHARGE)[S]?)[\\s\\S]*?${conditionBoundary}` +
+      `${clausePrefix}(?:(?:EACH\\s+)?(?:L\\/?C\\s+)?(?:PAYMENT|SETTLEMENT|REIMBURSEMENT|DOCUMENT\\s*SETTLEMENT|FUND\\s*TRANSFER|RTGS)[\\s\\S]{0,40}?(?:CHARGE|COMMISSION|FEE|COST|EXPENSE|ATTRACT)[S]?[\\s\\S]*?${conditionBoundary})` +
+      `|${clausePrefix}(?:AT\\s+THE\\s+TIME\\s+OF\\s+PAYMENT[\\s\\S]{1,60}?(?:WE\\s+)?(?:WILL|SHALL)\\s+(?:BE\\s+)?DEDUCT(?:ED)?)[\\s\\S]*?${conditionBoundary}` +
+      `|${clausePrefix}(?:(?:WE\\s+)?(?:WILL|SHALL)\\s+(?:BE\\s+)?DEDUCT(?:ED)?[\\s\\S]{1,60}?AS\\s+(?:PAYMENT|SETTLEMENT|REIMBURSEMENT)\\s+(?:FEE|CHARGE)[S]?)[\\s\\S]*?${conditionBoundary}` +
       `|(?:(?:AN\\s+AMOUNT\\s+OF\\s+)?(?:USD|EUR|GBP)?\\s*[\\d.]+\\s+AS\\s+(?:DOCUMENT\\s+)?SETTLEMENT[\\s\\S]*?${conditionBoundary})`,
       'gi'
     );
     let pMatch;
     while ((pMatch = paymentRegexGlobal.exec(textWithout71D)) !== null) {
       const snippet = pMatch[0].trim();
-      if (snippet.includes('DISCREPA')) continue; // Skip accidental overlap with discrepancy condition
+      if (snippet.includes('DISCREPA') && !snippet.includes('PAYMENT')) continue; // Skip accidental overlap with discrepancy condition
       const upperSnippet = snippet.toUpperCase();
 
       const isBorneByApplicant =
@@ -571,6 +655,10 @@ export function auditLcText(text: string, settings?: UserSettings): LcAuditResul
     ? `Discrepancy Fee: USD ${discAmt.toFixed(2)} (${isDiscOnApplicant ? "Applicant's Account" : "Beneficiary's Account"})`
     : `Discrepancy Fee: None in LC`;
 
+  const expPayerStr = hasExpiredLcMention
+    ? ` | Expired L/C Fee: USD ${expiredLcAmt.toFixed(2)} (${isExpiredLcOnApplicant ? "Applicant's Account" : "Beneficiary's Account"})`
+    : '';
+
   const payPayerStr = hasAnyPaymentFeeMention
     ? (totalPaymentFeeBeneficiary > 0
         ? `Payment Charges: USD ${totalPaymentFeeBeneficiary.toFixed(2)} (Beneficiary's Account)`
@@ -578,19 +666,23 @@ export function auditLcText(text: string, settings?: UserSettings): LcAuditResul
     : `Payment Charges: None in LC`;
 
   const cableStr = cableSwiftTotal > 0 ? ` | Cable/SWIFT: USD ${cableSwiftTotal.toFixed(2)} (Beneficiary's Account)` : '';
-  const breakdownFull = `${discPayerStr} | ${payPayerStr}${cableStr}`;
+  const breakdownFull = `${discPayerStr}${expPayerStr} | ${payPayerStr}${cableStr}`;
 
   // 4. COMBINED CHARGE RULES EVALUATION & BREAKDOWN OBJECT
   const discOnBeneficiary = (!isDiscOnApplicant && hasDiscrepancyMention) ? discAmt : 0;
+  const expiredOnBeneficiary = (!isExpiredLcOnApplicant && hasExpiredLcMention) ? expiredLcAmt : 0;
   const payOnBeneficiary = totalPaymentFeeBeneficiary;
-  const totalBeneficiaryCharges = discOnBeneficiary + payOnBeneficiary + cableSwiftTotal;
+  const totalBeneficiaryCharges = discOnBeneficiary + payOnBeneficiary + expiredOnBeneficiary + cableSwiftTotal;
 
-  // Clause locations for discrepancy & payment
-  const discClauseNum = extractClauseNumber(cleanDiscSnippet);
+  // Clause locations for discrepancy, expired LC & payment
+  const discClauseNum = extractClauseNumber(cleanDiscSnippet, normalizedText);
   const discLoc = discClauseNum ? `Field 47A, ${discClauseNum}` : (hasDiscrepancyMention ? 'Field 47A' : 'Field 47A (Missing)');
 
+  const expClauseNum = hasExpiredLcMention ? extractClauseNumber(cleanExpiredLcSnippet, normalizedText) : null;
+  const expLoc = expClauseNum ? `Field 47A, ${expClauseNum}` : 'Field 47A';
+
   const primaryPayFee = detectedPaymentFees.find(f => f.payer === 'Beneficiary') || detectedPaymentFees[0];
-  const payClauseNum = primaryPayFee ? extractClauseNumber(primaryPayFee.text) : null;
+  const payClauseNum = primaryPayFee ? extractClauseNumber(primaryPayFee.text, normalizedText) : null;
   const payLoc = primaryPayFee
     ? (primaryPayFee.type.includes('71D')
         ? 'Field 71D'
@@ -599,15 +691,14 @@ export function auditLcText(text: string, settings?: UserSettings): LcAuditResul
             : (payClauseNum ? `Field 47A, ${payClauseNum}` : 'Field 47A')))
     : 'Field 47A (Missing)';
 
+  const relevantClauses = [discClauseNum, expClauseNum, payClauseNum].filter(Boolean) as string[];
   let combinedLoc = 'Field 47A';
-  if (discClauseNum && payClauseNum) {
-    combinedLoc = `Field 47A (${discClauseNum} & ${payClauseNum})`;
-  } else if (discClauseNum && payLoc.includes('71D')) {
-    combinedLoc = `Field 47A (${discClauseNum}) & Field 71D`;
-  } else if (discClauseNum) {
-    combinedLoc = `Field 47A, ${discClauseNum}`;
-  } else if (payClauseNum) {
-    combinedLoc = `Field 47A, ${payClauseNum}`;
+  if (relevantClauses.length > 1) {
+    const formatted = relevantClauses.map((c, i) => i === 0 ? c : c.replace(/^Clause\s*/i, ''));
+    const last = formatted.pop();
+    combinedLoc = `Field 47A (${formatted.join(', ')} & ${last})`;
+  } else if (relevantClauses.length === 1) {
+    combinedLoc = `Field 47A, ${relevantClauses[0]}`;
   }
 
   // Construct Charge Breakdown items (who pays what)
@@ -625,8 +716,20 @@ export function auditLcText(text: string, settings?: UserSettings): LcAuditResul
     });
   }
 
+  if (hasExpiredLcMention && expiredLcAmt > 0) {
+    breakdownItems.push({
+      type: 'Expired L/C Presentation Fee',
+      amount: expiredLcAmt,
+      currency: detectedCurrency || 'USD',
+      payer: isExpiredLcOnApplicant ? 'Applicant' : 'Beneficiary',
+      clauseSnippet: expiredLcSnippet,
+      clauseLocation: expLoc,
+      isExceeding: !isExpiredLcOnApplicant
+    });
+  }
+
   for (const pf of detectedPaymentFees) {
-    const itemLoc = pf.type.includes('71D') ? 'Field 71D' : (pf.type.includes('78') ? 'Field 78' : resolveClauseLocation('Field 47A', pf.text));
+    const itemLoc = pf.type.includes('71D') ? 'Field 71D' : (pf.type.includes('78') ? 'Field 78' : resolveClauseLocation('Field 47A', pf.text, normalizedText));
     breakdownItems.push({
       type: pf.type,
       amount: pf.amount,
@@ -651,7 +754,7 @@ export function auditLcText(text: string, settings?: UserSettings): LcAuditResul
 
   const chargeBreakdown: ChargeBreakdown = {
     totalBeneficiary: totalBeneficiaryCharges,
-    totalApplicant: (isDiscOnApplicant ? discAmt : 0) + totalPaymentFeeApplicant,
+    totalApplicant: (isDiscOnApplicant ? discAmt : 0) + (isExpiredLcOnApplicant ? expiredLcAmt : 0) + totalPaymentFeeApplicant,
     items: breakdownItems,
     summaryText: breakdownFull
   };
@@ -699,28 +802,31 @@ export function auditLcText(text: string, settings?: UserSettings): LcAuditResul
       }
     });
   }
-  // Case B: Both Discrepancy and Payment charges are present in LC
+  // Case B: Both Discrepancy and Payment charges are present in LC (or Expired LC fee present)
   else if (hasDiscrepancyMention && hasAnyPaymentFeeMention) {
     const discNeedsRevision = discOnBeneficiary > 25;
     const payNeedsRevision = payOnBeneficiary > 25;
-    const combinedNeedsRevision = totalBeneficiaryCharges > 50;
+    const combinedNeedsRevision = totalBeneficiaryCharges > 50 || (hasExpiredLcMention && !isExpiredLcOnApplicant);
 
-    // If both need revision OR combined total exceeds $50.00
+    // If both need revision OR combined total exceeds $50.00 OR extra expired LC fee present
     if ((discNeedsRevision && payNeedsRevision) || (combinedNeedsRevision && (discOnBeneficiary > 0 && payOnBeneficiary > 0))) {
       issues.push({
         id: 'issue_combined_charges_revision',
         correctionId: 'discrepancy_payment_charges_revision',
-        title: 'Revise Discrepancy & Payment Charges (Combined Exceeds Limits)',
+        title: hasExpiredLcMention
+          ? `Revise Bank Charges & Deductions (Combined USD ${totalBeneficiaryCharges.toFixed(2)} Exceeds Limits)`
+          : 'Revise Discrepancy & Payment Charges (Combined Exceeds Limits)',
         clauseLocation: combinedLoc,
         severity: 'warning',
-        reason: `Bank charges placed on beneficiary exceed acceptable limits: ${breakdownFull}. Total beneficiary deductions USD ${totalBeneficiaryCharges.toFixed(2)} exceed the ceiling of USD 50.00. Discrepancy must be max USD 25.00, payment max USD 25.00, and combined total max USD 50.00.`,
+        reason: `Bank charges placed on beneficiary exceed acceptable limits: ${breakdownFull}. Total beneficiary deductions USD ${totalBeneficiaryCharges.toFixed(2)} exceed the ceiling of USD 50.00. Discrepancy must be max USD 25.00, payment max USD 25.00${hasExpiredLcMention ? `, extra expired L/C fee of USD ${expiredLcAmt.toFixed(2)} deleted` : ''}, and combined total max USD 50.00.`,
         detectedText: breakdownFull,
         chargeBreakdown,
         suggestedDetails: {
           discrepancyChargeInLc: discAmt.toFixed(2),
           paymentChargeInLc: totalPaymentFeeBeneficiary.toFixed(2),
           acceptableDiscrepancyCharge: '25.00',
-          acceptablePaymentCharge: '25.00'
+          acceptablePaymentCharge: '25.00',
+          additionalNote: hasExpiredLcMention && !isExpiredLcOnApplicant ? `Delete extra Expired L/C fee of USD ${expiredLcAmt.toFixed(2)}` : undefined
         }
       });
     } else if (discNeedsRevision && !payNeedsRevision) {
@@ -826,6 +932,20 @@ export function auditLcText(text: string, settings?: UserSettings): LcAuditResul
     });
   }
 
+  // Case E: Standalone Expired L/C Presentation Fee (if not already part of combined revision issue)
+  if (hasExpiredLcMention && !isExpiredLcOnApplicant && !issues.some(i => i.id === 'issue_combined_charges_revision')) {
+    issues.push({
+      id: 'issue_expired_lc_presentation_fee',
+      correctionId: 'discrepancy_charges',
+      title: `Fee for Presentation Under Expired L/C (USD ${expiredLcAmt.toFixed(2)}) – Delete`,
+      clauseLocation: expLoc,
+      severity: 'warning',
+      reason: `The LC imposes an additional fee of USD ${expiredLcAmt.toFixed(2)} for presentation under expired credit. Under standard commercial terms, beneficiary should only bear standard discrepancy fees up to USD 25.00-35.00. Additional expired presentation penalties must be deleted or borne by the applicant.`,
+      detectedText: expiredLcSnippet,
+      chargeBreakdown
+    });
+  }
+
   // ==========================================
   // RULE 3: Acceptance After Physical Verification / Receipt / Damage Claims – Delete
   // ==========================================
@@ -896,23 +1016,28 @@ export function auditLcText(text: string, settings?: UserSettings): LcAuditResul
   }
 
   // ==========================================
-  // RULE 5: Applicant Inspection Certificate Removal
+  // RULE 5: Applicant Inspection Certificate / Certificate Removal
   // ==========================================
   if (
-    upper.includes('APPLICANT\'S INSPECTION CERTIFICATE') ||
-    upper.includes('APPLICANTS INSPECTION CERTIFICATE') ||
-    upper.includes('BUYER\'S INSPECTION CERTIFICATE') ||
-    upper.includes('CERTIFICATE SIGNED BY APPLICANT') ||
-    upper.includes('CERTIFICATE SIGNED BY BUYER')
+    upper.includes("APPLICANT'S INSPECTION CERTIFICATE") ||
+    upper.includes("APPLICANTS INSPECTION CERTIFICATE") ||
+    upper.includes("BUYER'S INSPECTION CERTIFICATE") ||
+    upper.includes("CERTIFICATE SIGNED BY APPLICANT") ||
+    upper.includes("CERTIFICATE SIGNED BY BUYER") ||
+    upper.includes("APPLICANT'S CERTIFICATE") ||
+    upper.includes("APPLICANTS CERTIFICATE") ||
+    upper.includes("BUYER'S CERTIFICATE") ||
+    (upper.includes("COUNTER-SIGNED BY") && (upper.includes("APPLICANT") || upper.includes("BUYER") || upper.includes("MANAGING DIRECTOR")))
   ) {
-    const snippet = extractSnippet(normalizedText, /(?:APPLICANT|BUYER)['S ]*INSPECTION CERTIFICATE/i);
+    const snippet = extractSnippet(normalizedText, /(?:APPLICANT|BUYER)['S ]*(?:INSPECTION\s+)?CERTIFICATE[^\n.]{0,100}/i) ||
+                    extractSnippet(normalizedText, /COUNTER-SIGNED\s+BY[^\n.]{0,100}/i);
     issues.push({
       id: 'issue_applicant_certificate',
       correctionId: 'physical_verification_clause',
-      title: 'Applicant Inspection Certificate Removal',
-      clauseLocation: resolveClauseLocation('Field 47A', snippet),
+      title: 'Applicant Certificate / Inspection Removal',
+      clauseLocation: resolveClauseLocation('Field 46A/47A', snippet, normalizedText),
       severity: 'critical',
-      reason: 'Requiring an inspection certificate signed by the buyer/applicant allows the buyer to withhold approval and block payment at will.',
+      reason: 'Requiring an inspection or delivery certificate signed/counter-signed by the buyer/applicant allows the buyer to withhold approval and block payment at will.',
       detectedText: snippet
     });
   }
@@ -996,17 +1121,18 @@ export function auditLcText(text: string, settings?: UserSettings): LcAuditResul
   // ==========================================
   // RULE 7B: Fund Transfer / Remittance Charges at Payment Time
   // ==========================================
+  const upperNo71d = textWithout71D.toUpperCase();
   if (
-    upper.includes('FUND TRANSFER') &&
-    (upper.includes('DEDUCTED') || upper.includes('BENEFICIARY') || upper.includes('TIME OF PAYMENT'))
+    upperNo71d.includes('FUND TRANSFER') &&
+    (upperNo71d.includes('DEDUCTED') || upperNo71d.includes('BENEFICIARY') || upperNo71d.includes('TIME OF PAYMENT'))
   ) {
-    const fundSnippet = extractSnippet(normalizedText, /DEDUCTED\s*FUND\s*TRANSFER\s*CHARGES[^\n.]{0,100}/i) ||
-                         extractSnippet(normalizedText, /FUND\s*TRANSFER\s*CHARGES[^\n.]{0,100}/i);
+    const fundSnippet = extractSnippet(textWithout71D, /DEDUCTED\s*FUND\s*TRANSFER\s*CHARGES[^\n.]{0,100}/i) ||
+                         extractSnippet(textWithout71D, /FUND\s*TRANSFER\s*CHARGES[^\n.]{0,100}/i);
     issues.push({
       id: 'issue_fund_transfer_charges',
       correctionId: 'fund_transfer_charges',
       title: 'Fund Transfer Charges Deducted at Payment Time',
-      clauseLocation: resolveClauseLocation('Field 47A', fundSnippet),
+      clauseLocation: resolveClauseLocation('Field 47A', fundSnippet, normalizedText),
       severity: 'warning',
       reason: 'The LC mentions deducting fund transfer charges from payment proceeds. Fund transfer / remittance charges must be capped or borne by the applicant.',
       detectedText: fundSnippet || 'Deducted fund transfer charges at the time of payment.'
