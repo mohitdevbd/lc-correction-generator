@@ -12,10 +12,50 @@ try {
   pdfjsLib.GlobalWorkerOptions.workerSrc = `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjsLib.version}/pdf.worker.min.mjs`;
 }
 
+export interface PdfExtractProgress {
+  status: string;
+  page?: number;
+  totalPages?: number;
+  progressPercent?: number;
+}
+
+/**
+ * Extracts text from an uploaded image file (PNG/JPG/WEBP) using Tesseract OCR in the browser.
+ */
+export async function extractTextFromImage(
+  file: File,
+  onProgress?: (info: PdfExtractProgress) => void
+): Promise<string> {
+  const { createWorker } = await import('tesseract.js');
+  onProgress?.({ status: 'Starting OCR for image...', progressPercent: 10 });
+
+  const worker = await createWorker('eng', 1, {
+    logger: (m: any) => {
+      if (m.status === 'recognizing text' && typeof m.progress === 'number') {
+        onProgress?.({
+          status: `Reading text from image (${Math.round(m.progress * 100)}%)...`,
+          progressPercent: Math.round(m.progress * 100)
+        });
+      }
+    }
+  });
+
+  try {
+    const { data: { text } } = await worker.recognize(file);
+    return text || '';
+  } finally {
+    await worker.terminate();
+  }
+}
+
 /**
  * Extracts plain text from an uploaded PDF file in the browser using pdfjs-dist.
+ * Automatically falls back to browser OCR (Tesseract.js) for scanned image-only PDFs.
  */
-export async function extractTextFromPdf(file: File): Promise<string> {
+export async function extractTextFromPdf(
+  file: File,
+  onProgress?: (info: PdfExtractProgress) => void
+): Promise<string> {
   const arrayBuffer = await file.arrayBuffer();
   const loadingTask = pdfjsLib.getDocument({ data: new Uint8Array(arrayBuffer) });
   const pdfDocument = await loadingTask.promise;
@@ -61,7 +101,73 @@ export async function extractTextFromPdf(file: File): Promise<string> {
     pageTexts.push(lines.join('\n'));
   }
 
-  return pageTexts.join('\n\n--- PAGE BREAK ---\n\n');
+  const nativeText = pageTexts.join('\n\n--- PAGE BREAK ---\n\n');
+  if (nativeText.replace(/\s+/g, '').length >= 30) {
+    return nativeText;
+  }
+
+  // Fallback for scanned image-only PDFs using client-side OCR
+  if (typeof document === 'undefined') {
+    return nativeText;
+  }
+
+  const { createWorker } = await import('tesseract.js');
+  let currentOcrPage = 1;
+  onProgress?.({
+    status: `Scanned PDF detected — Preparing OCR for ${numPages} page${numPages > 1 ? 's' : ''}...`,
+    page: 1,
+    totalPages: numPages,
+    progressPercent: 5
+  });
+
+  const worker = await createWorker('eng', 1, {
+    logger: (m: any) => {
+      if (m.status === 'recognizing text' && typeof m.progress === 'number') {
+        const overall = Math.round(((currentOcrPage - 1 + m.progress) / numPages) * 100);
+        onProgress?.({
+          status: `Scanned PDF OCR: Page ${currentOcrPage} of ${numPages} (${Math.round(m.progress * 100)}%)...`,
+          page: currentOcrPage,
+          totalPages: numPages,
+          progressPercent: overall
+        });
+      }
+    }
+  });
+
+  const ocrPageTexts: string[] = [];
+  try {
+    for (let pageNum = 1; pageNum <= numPages; pageNum++) {
+      currentOcrPage = pageNum;
+      onProgress?.({
+        status: `Scanned PDF OCR: Rendering page ${pageNum} of ${numPages}...`,
+        page: pageNum,
+        totalPages: numPages,
+        progressPercent: Math.round(((pageNum - 1) / numPages) * 100)
+      });
+
+      const page = await pdfDocument.getPage(pageNum);
+      const viewport = page.getViewport({ scale: 2.2 });
+      const canvas = document.createElement('canvas');
+      canvas.width = viewport.width;
+      canvas.height = viewport.height;
+      const context = canvas.getContext('2d');
+      if (!context) continue;
+
+      context.fillStyle = '#ffffff';
+      context.fillRect(0, 0, canvas.width, canvas.height);
+
+      await page.render({ canvas, canvasContext: context, viewport }).promise;
+
+      const { data: { text } } = await worker.recognize(canvas);
+      if (text && text.trim()) {
+        ocrPageTexts.push(text.trim());
+      }
+    }
+  } finally {
+    await worker.terminate();
+  }
+
+  return ocrPageTexts.join('\n\n--- PAGE BREAK ---\n\n');
 }
 
 interface SlabTier {
@@ -285,7 +391,17 @@ function resolveClauseLocation(defaultField: string, snippet?: string, parentTex
  * Parses SWIFT MT700 / LC fields and checks standard commercial audit rules.
  */
 export function auditLcText(text: string, settings?: UserSettings): LcAuditResult {
-  const normalizedText = text.replace(/\r\n/g, '\n');
+  // Exclude appended Proforma Invoice pages in multi-page LC+PI scanned PDFs
+  const rawPages = text.split(/\n*--- PAGE BREAK ---\n*/);
+  const filteredPages = rawPages.length > 1
+    ? rawPages.filter((p, idx) => {
+        if (idx === 0) return true;
+        const up = p.toUpperCase();
+        const isPiPage = /\bPROFORMA\s+INVOICE\b/.test(up) && !/(?::46A:|:47A:|:71D:|:78:|F46A:|F47A:|F71D:|F78:)/.test(up);
+        return !isPiPage;
+      })
+    : rawPages;
+  const normalizedText = filteredPages.join('\n\n--- PAGE BREAK ---\n\n').replace(/\r\n/g, '\n');
   const upper = normalizedText.toUpperCase();
 
   // 1. Extract Core Metadata
@@ -350,17 +466,24 @@ export function auditLcText(text: string, settings?: UserSettings): LcAuditResul
       chargesBlock.includes('ARE ON BENEFICIARY') ||
       chargesBlock.includes('BE ON BENEFICIARY') ||
       chargesBlock.includes('WILL BE ON BENEFICIARY') ||
-      chargesBlock.includes('BORNE BY BENEFICIARY');
+      chargesBlock.includes('BORNE BY BENEFICIARY') ||
+      chargesBlock.includes('BORNE BY THE BENEFICIARY') ||
+      chargesBlock.includes('BORN BY THE BENEFICIARY') ||
+      chargesBlock.includes('BORN BY BENEFICIARY');
 
     if (hasBeneficiaryCharge) {
       const hasOutsideQualifier =
         chargesBlock.includes('OUTSIDE ISSUING') ||
         chargesBlock.includes('OUTSIDE THE ISSUING') ||
+        chargesBlock.includes('OUTSIDE OF THE ISSUING') ||
+        chargesBlock.includes('OUTSIDE OF ISSUING') ||
         chargesBlock.includes('OUTSIDE ISSUING BANK') ||
         chargesBlock.includes("OUTSIDE ISSUING BANK'S") ||
         chargesBlock.includes('OUT SIDE ISSUING BANK') ||
         chargesBlock.includes("OUT SIDE ISSUING BANK'S") ||
         chargesBlock.includes('OUTSIDE OUR COUNTER') ||
+        chargesBlock.includes('OUTSIDE OUR BANK COUNTER') ||
+        chargesBlock.includes('OUTSIDEOUR BANK COUNTER') ||
         chargesBlock.includes('OUT SIDE OUR COUNTER') ||
         chargesBlock.includes('OUTSIDE OF OUR COUNTER') ||
         chargesBlock.includes('OUTSIDE BANGLADESH') ||
@@ -1038,23 +1161,27 @@ export function auditLcText(text: string, settings?: UserSettings): LcAuditResul
   }
 
   // ==========================================
-  // RULE 5: Applicant Inspection Certificate / Certificate Removal
+  // RULE 5: Applicant Inspection Certificate / Signatory Verification Removal
   // ==========================================
+  const upperFlat = upper.replace(/\s+/g, ' ');
   if (
-    upper.includes("APPLICANT'S INSPECTION CERTIFICATE") ||
-    upper.includes("APPLICANTS INSPECTION CERTIFICATE") ||
-    upper.includes("BUYER'S INSPECTION CERTIFICATE") ||
-    upper.includes("CERTIFICATE SIGNED BY APPLICANT") ||
-    upper.includes("CERTIFICATE SIGNED BY BUYER") ||
-    upper.includes("APPLICANT'S CERTIFICATE") ||
-    upper.includes("APPLICANTS CERTIFICATE") ||
-    upper.includes("APPLICANT CERTIFICATE") ||
-    upper.includes("BUYER'S CERTIFICATE") ||
-    upper.includes("BUYER CERTIFICATE") ||
+    upperFlat.includes("APPLICANT'S INSPECTION CERTIFICATE") ||
+    upperFlat.includes("APPLICANTS INSPECTION CERTIFICATE") ||
+    upperFlat.includes("BUYER'S INSPECTION CERTIFICATE") ||
+    upperFlat.includes("CERTIFICATE SIGNED BY APPLICANT") ||
+    upperFlat.includes("CERTIFICATE SIGNED BY BUYER") ||
+    upperFlat.includes("APPLICANT'S CERTIFICATE") ||
+    upperFlat.includes("APPLICANTS CERTIFICATE") ||
+    upperFlat.includes("APPLICANT CERTIFICATE") ||
+    upperFlat.includes("BUYER'S CERTIFICATE") ||
+    upperFlat.includes("BUYER CERTIFICATE") ||
+    upperFlat.includes("SIGNATURE MUST BE MATCHED") ||
+    (upperFlat.includes("RECEIVED IN GOOD") && (upperFlat.includes("AUTHORISED REPRESENTATIVE") || upperFlat.includes("AUTHORIZED REPRESENTATIVE") || upperFlat.includes("AUTHORIZED SIGNATORY"))) ||
     /(?:COUNTER-?SIGNED|SIGNED)\s+BY\s+(?:THE\s+)?(?:APPLICANT|BUYER|MANAGING\s+DIRECTOR|CHAIRMAN)/i.test(normalizedText)
   ) {
     const snippet = extractSnippet(normalizedText, /(?:APPLICANT|BUYER)(?:'S|S)?\s+(?:INSPECTION\s+)?CERTIFICATE[^\n.]{0,100}/i) ||
-                    extractSnippet(normalizedText, /(?:COUNTER-?SIGNED|SIGNED)\s+BY\s+(?:THE\s+)?(?:APPLICANT|BUYER|MANAGING\s+DIRECTOR|CHAIRMAN)[^\n.]{0,100}/i);
+                    extractSnippet(normalizedText, /(?:COUNTER-?SIGNED|SIGNED)\s+BY\s+(?:THE\s+)?(?:APPLICANT|BUYER|MANAGING\s+DIRECTOR|CHAIRMAN)[^\n.]{0,100}/i) ||
+                    extractSnippet(normalizedText, /(?:RECEIVED\s+IN\s+GOOD|SIGNATURE\s+MUST\s+BE\s+MATCHED)[^\n.]{0,120}/i);
     issues.push({
       id: 'issue_applicant_certificate',
       correctionId: 'physical_verification_clause',
@@ -1204,7 +1331,7 @@ export function auditLcText(text: string, settings?: UserSettings): LcAuditResul
   // ==========================================
   // AT SIGHT LCs: Payment is due immediately upon compliant documents. Overdue clause is NOT required.
   // Usance / Deferred LCs: Payment is deferred (30/60/90/120/180 days). Overdue interest clause IS required.
-  const f42cMatch = normalizedText.match(/(?:F42C:\s*Drafts\s*(?:at)?\s*(?:\.{1,3}|…)?|:42C:)\s*[:#]?\s*([^\n]+)/i);
+  const f42cMatch = normalizedText.match(/(?:F42C:\s*Drafts\s*(?:at)?\s*(?:\.{1,3}|…)?|:42C:|F42P:[^\n]*|:42P:[^\n]*)\s*[:#]?\s*\n?\s*([^\n]+)/i);
   const tenorFieldText = f42cMatch ? f42cMatch[1].toUpperCase() : '';
 
   const isAtSight = tenorFieldText.includes('AT SIGHT') ||
@@ -1316,11 +1443,11 @@ export function auditLcText(text: string, settings?: UserSettings): LcAuditResul
                                     /PARTIAL\s+DRAWING[S]?\s+(?:IS\s+|ARE\s+)?NOT\s+ALLOWED/i.test(normalizedText) ||
                                     /PARTIAL\s+DRAWINGS?\s+PROHIBITED/i.test(normalizedText) ||
                                     /NO\s+PARTIAL\s+DRAWING/i.test(normalizedText) ||
-                                    /DOCUMENTS\s+TO\s+BE\s+DESPATCHED\s+IN\s+ONE\s+LOT/i.test(normalizedText);
+                                    /DOCUMENTS\s+TO\s+BE\s+DESPATCHED[\s\S]{0,160}?\bIN\s+ONE\s+LOT\b/i.test(normalizedText);
 
   if (isPartialPaymentRestricted) {
     const partialSnippet = extractSnippet(normalizedText, /PARTIAL\s+(?:PAYMENT|DRAWING)[S]?[^\n.]{0,80}/i) ||
-                           extractSnippet(normalizedText, /DOCUMENTS\s+TO\s+BE\s+DESPATCHED\s+IN\s+ONE\s+LOT[^\n.]{0,80}/i);
+                           extractSnippet(normalizedText, /DOCUMENTS\s+TO\s+BE\s+DESPATCHED[\s\S]{0,160}?\bIN\s+ONE\s+LOT\b/i);
     issues.push({
       id: 'issue_partial_payment_not_allowed',
       correctionId: 'partial_payment_not_allowed',

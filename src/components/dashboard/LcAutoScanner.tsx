@@ -19,7 +19,7 @@ import {
   Bookmark
 } from 'lucide-react';
 import type { LcAuditResult, UserSettings, AdditionalDetails } from '../../types';
-import { extractTextFromPdf, auditLcText } from '../../services/lcParserService';
+import { extractTextFromPdf, extractTextFromImage, auditLcText } from '../../services/lcParserService';
 
 interface LcAutoScannerProps {
   settings: UserSettings;
@@ -69,6 +69,7 @@ export const LcAutoScanner: React.FC<LcAutoScannerProps> = ({
   const [activeTab, setActiveTab] = useState<'upload' | 'paste'>('upload');
   const [isDragging, setIsDragging] = useState(false);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
+  const [scanStatus, setScanStatus] = useState<string | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [pastedText, setPastedText] = useState('');
   const [fileName, setFileName] = useState<string | null>(null);
@@ -81,7 +82,9 @@ export const LcAutoScanner: React.FC<LcAutoScannerProps> = ({
 
   const handleProcessText = (text: string, sourceName: string) => {
     if (!text.trim()) {
-      setErrorMsg('No text content found in document.');
+      setErrorMsg('No text content found in document (even after OCR). Please check the file or paste text manually.');
+      setIsAnalyzing(false);
+      setScanStatus(null);
       return;
     }
 
@@ -100,17 +103,33 @@ export const LcAutoScanner: React.FC<LcAutoScannerProps> = ({
       setErrorMsg(err?.message || 'Error occurred while scanning LC.');
     } finally {
       setIsAnalyzing(false);
+      setScanStatus(null);
     }
   };
 
   const handleFileUpload = async (file: File) => {
     setErrorMsg(null);
     setIsAnalyzing(true);
+    setScanStatus('Reading file...');
     setFileName(file.name);
 
     try {
-      if (file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf')) {
-        const extractedText = await extractTextFromPdf(file);
+      const lowerName = file.name.toLowerCase();
+      if (file.type === 'application/pdf' || lowerName.endsWith('.pdf')) {
+        const extractedText = await extractTextFromPdf(file, (info) => {
+          setScanStatus(info.status);
+        });
+        handleProcessText(extractedText, file.name);
+      } else if (
+        file.type.startsWith('image/') ||
+        lowerName.endsWith('.png') ||
+        lowerName.endsWith('.jpg') ||
+        lowerName.endsWith('.jpeg') ||
+        lowerName.endsWith('.webp')
+      ) {
+        const extractedText = await extractTextFromImage(file, (info) => {
+          setScanStatus(info.status);
+        });
         handleProcessText(extractedText, file.name);
       } else {
         // Text / raw swift format
@@ -118,8 +137,9 @@ export const LcAutoScanner: React.FC<LcAutoScannerProps> = ({
         handleProcessText(text, file.name);
       }
     } catch (err: any) {
-      setErrorMsg('Could not read PDF. Make sure it is not password protected.');
+      setErrorMsg('Could not read file. Make sure it is not password protected.');
       setIsAnalyzing(false);
+      setScanStatus(null);
     }
   };
 
@@ -257,7 +277,7 @@ export const LcAutoScanner: React.FC<LcAutoScannerProps> = ({
                   <input
                     ref={fileInputRef}
                     type="file"
-                    accept=".pdf,.txt"
+                    accept=".pdf,.txt,.png,.jpg,.jpeg,.webp"
                     onChange={(e) => {
                       if (e.target.files && e.target.files.length > 0) {
                         handleFileUpload(e.target.files[0]);
@@ -269,8 +289,8 @@ export const LcAutoScanner: React.FC<LcAutoScannerProps> = ({
                   {isAnalyzing ? (
                     <div className="flex flex-col items-center space-y-2">
                       <Loader2 className="h-8 w-8 text-indigo-600 animate-spin" />
-                      <span className="text-xs font-medium text-slate-700">
-                        Analyzing LC clauses against UCP 600 & export standards...
+                      <span className="text-xs font-medium text-indigo-700">
+                        {scanStatus || 'Analyzing LC clauses against UCP 600 & export standards...'}
                       </span>
                     </div>
                   ) : (
@@ -279,10 +299,10 @@ export const LcAutoScanner: React.FC<LcAutoScannerProps> = ({
                         <UploadCloud className="h-6 w-6" />
                       </div>
                       <p className="text-xs font-semibold text-slate-800">
-                        Click to browse or drag and drop your LC PDF here
+                        Click to browse or drag and drop your LC PDF / Scanned Document / Image here
                       </p>
                       <p className="text-[11px] text-slate-400 mt-1">
-                        Supports PDF (SWIFT MT700 or scanned doc) & Text files • 100% processed locally
+                        Supports Digital PDF, Scanned PDF (Built-in OCR), Images (PNG/JPG) & Text files • 100% private
                       </p>
                     </>
                   )}
