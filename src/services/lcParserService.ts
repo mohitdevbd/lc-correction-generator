@@ -76,15 +76,17 @@ function parseAllSlabTiers(clauseText: string): SlabTier[] {
   const tiers: SlabTier[] = [];
   
   const parts = clauseText
-    .split(/(?=(?:[IVXLCDM]+\)|\b[0-9]{1,2}[\).]))/i)
+    .split(/(?=(?:(?:\b|\n)(?:IV|IX|V?I{1,3}|X)[\.\)]\s*[A-Z]|\b[0-9]{1,2}[\.\)]\s*[A-Z]))/i)
     .map(p => p.trim())
     .filter(p => p.length > 5);
 
   for (const part of parts) {
     const norm = part.replace(/\s+/g, ' ');
 
-    const feeMatch = norm.match(/(?:USD|EUR|GBP)?\s*(\d+(?:\.\d{2})?)\s*(?:USD|EUR|GBP)?\s*(?:SHALL\s+BE\s+DEDUCTED|AS\s+(?:DISCREPANCY|PAYMENT|SETTLEMENT)|\(FOR\s+DOCUMENT\s+VALUE|\bFOR\s+BILL\s+VALUE|\bFOR\s+VALUE|\bFOR\s+DOCUMENTS?|\bFOR\s+INVOICE|\bAT\b)/i) ||
-                     norm.match(/(?:(?:USD|EUR|GBP)\s*(\d+(?:\.\d{2})?))/i);
+    const feeMatch =
+      norm.match(/(?:CHARGE|FEE|COMMISSION|DEDUCT(?:ED)?|COST)\s*(?:OF|IS|AT|:)?\s*(?:USD|EUR|GBP)?\s*(\d{1,3}(?:\.\d{2})?)\b(?!\s*,\s*\d{3})/i) ||
+      norm.match(/(?:USD|EUR|GBP)?\s*(\d{1,3}(?:\.\d{2})?)\b(?!\s*,\s*\d{3})\s*(?:USD|EUR|GBP)?\s*(?:SHALL\s+BE\s+DEDUCTED|AS\s+(?:DISCREPANCY|PAYMENT|SETTLEMENT)|\(FOR\s+DOCUMENT\s+VALUE|\bFOR\s+BILL\s+VALUE|\bFOR\s+VALUE|\bFOR\s+DOCUMENTS?|\bFOR\s+INVOICE|\bAT\b)/i) ||
+      norm.match(/(?<!(?:TO|UPTO|UP\s+TO|ABOVE|EXCEEDING|VALUE)\s+(?:USD|EUR|GBP)?\s*)(?:USD|EUR|GBP)\s*(\d{1,3}(?:\.\d{2})?)\b(?!\s*,\s*\d{3})/i);
     if (!feeMatch) continue;
 
     const fee = parseFloat(feeMatch[1]);
@@ -216,19 +218,25 @@ function extractClauseNumber(snippet?: string, parentText?: string): string | nu
   if (!snippet) return null;
   const trimmed = snippet.trim();
 
-  // First check if snippet itself starts with e.g. 05. or 05(B)
-  const mParentAndSub = trimmed.match(/^(?:Clause\s*)?([0-9]{1,2})\s*[\.\)]\s*(?:[A-Z\s]{0,20}:?\s*)?\(?([A-Z])[\.\)]?/i);
+  // First check if snippet itself starts with e.g. 05. CHARGES: (B) or 05(B)
+  const mParentAndSub = trimmed.match(/^(?:Clause\s*)?([0-9]{1,2})\s*[\.\)]?\s*(?:[A-Z\s]{0,20}:?\s*)?\(([A-Z])\)/i);
   if (mParentAndSub) {
     const p = mParentAndSub[1].padStart(2, '0');
     const sub = mParentAndSub[2];
     return `Clause ${p}(${sub})`;
   }
 
+  // Check if snippet starts directly with numbered clause (e.g. 7. PAYMENT, 08. DISCREPANCY)
+  const mNumStart = trimmed.match(/^(?:Clause\s*)?([0-9]{1,2})[\.\)](?!\d)/i);
+  if (mNumStart) {
+    return `Clause ${mNumStart[1].padStart(2, '0')}`;
+  }
+
   // Check subclause (A), (B), (C) or sub-letter
-  const mSub = trimmed.match(/^(?:Clause\s*)?\(?([A-Z])[\.\)]/i) ||
-               trimmed.match(/(?:^|\n|\b|\()(?:Clause\s*)?([A-Z])[\.\)]/i);
+  const mSub = trimmed.match(/^(?:Clause\s*)?\(([A-Z])\)/i) ||
+               trimmed.match(/^(?:Clause\s*)?([A-Z])[\.\)]\s+/i);
   if (mSub) {
-    const sub = mSub[1];
+    const sub = mSub[1] || mSub[2];
     if (parentText) {
       const idx = parentText.indexOf(trimmed.substring(0, Math.min(30, trimmed.length)));
       if (idx !== -1) {
@@ -243,11 +251,23 @@ function extractClauseNumber(snippet?: string, parentText?: string): string | nu
     return `Clause ${sub}`;
   }
 
-  // Check numbered clause 03., 14), etc.
-  const mNum = trimmed.match(/^(?:Clause\s*)?\(?([0-9]{1,2})[\.\)]/i) ||
-               trimmed.match(/(?:^|\n|\b|\()(?:Clause\s*)?([0-9]{1,2})[\.\)]\s*[A-Z]/i);
+  // Fallback numbered clause anywhere near start
+  const mNum = trimmed.match(/(?:^|\n|\b)(?:Clause\s*)?([0-9]{1,2})[\.\)](?!\d)\s*[A-Z]/i);
   if (mNum) {
     return `Clause ${mNum[1].padStart(2, '0')}`;
+  }
+
+  // Fallback: look back in parentText to find enclosing numbered clause
+  if (parentText) {
+    const idx = parentText.indexOf(trimmed.substring(0, Math.min(30, trimmed.length)));
+    if (idx !== -1) {
+      const lookBack = parentText.substring(Math.max(0, idx - 250), idx + 5);
+      const numMatches = [...lookBack.matchAll(/(?:^|\n|\.\s+)\s*([0-9]{1,2})[\.\)](?!\d)\s*[A-Z]/gi)];
+      if (numMatches.length > 0) {
+        const lastNum = numMatches[numMatches.length - 1][1];
+        return `Clause ${lastNum.padStart(2, '0')}`;
+      }
+    }
   }
 
   return null;
@@ -429,15 +449,17 @@ export function auditLcText(text: string, settings?: UserSettings): LcAuditResul
   let isDiscOnApplicant = false;
   let discSnippet = '';
 
-  // Top-level condition boundary: stops before next numbered (e.g. 1. or 4) or 10.) or lettered (e.g. A. or G.) condition, or bullet (+), or SWIFT tag (:XX:, FXX:, 71D:, 78:), or ALL CHARGES
-  const conditionBoundary = '(?=(?:(?:\\n|\\.|;|:)\\s*(?:\\([A-Z0-9]{1,2}\\)|[0-9]{1,2}[\\.\\)]|\\b[A-Z][\\.\\)]|\\+)\\s*[A-Z]|\\n\\s*:[0-9]{2}[A-Z]?:|\\s+:[0-9]{2}[A-Z]?:|\\n\\s*F[0-9]{2}[A-Z]?:|\\n\\s*[0-9]{2}[A-Z]?\\s*:|\\s+[0-9]{2}[A-Z]?\\s*:|\\bALL\\s+(?:BANKING|BANK)?\\s*CHARGES|$))';
-  const clausePrefix = '(?:(?:\\([A-Z0-9]{1,2}\\)|[0-9]{1,2}[\\.\\)]|[A-Z][\\.\\)])\\s*)?';
+  // Top-level condition boundary: stops before next numbered (e.g. 1. or 8.) or lettered (e.g. (A), A. ) condition, bullet (+), SWIFT tag (:XX:, FXX:, 71D:, 78:), or ALL CHARGES
+  // Carefully avoids breaking on Roman numeral sub-tiers (I.DOCUMENT) or decimal amounts on new lines (40.00, 75.00)
+  const conditionBoundary = '(?=(?:(?:\\n|\\.|;|:)\\s*(?:\\([A-Z0-9]{1,2}\\)|[0-9]{1,2}[\\.\\)](?!\\d)\\s*(?:[A-Z]|$)|(?!(?:I|V|X)[\\.\\)])\\b[A-Z][\\.\\)]\\s+|\\+\\s+)|\\n\\s*:[0-9]{2}[A-Z]?:|\\s+:[0-9]{2}[A-Z]?:|\\n\\s*F[0-9]{2}[A-Z]?:|\\n\\s*[0-9]{2}[A-Z]?\\s*:|\\s+[0-9]{2}[A-Z]?\\s*:|\\bALL\\s+(?:BANKING|BANK)?\\s*CHARGES|$))';
+  const clausePrefix = '(?:(?:\\([A-Z0-9]{1,2}\\)|[0-9]{1,2}[\\.\\)](?!\\d)|(?!(?:I|V|X)[\\.\\)])\\b[A-Z][\\.\\)])\\s*)?';
+  const sameConditionChar = '(?:(?!(?:\\n|\\.|;)\\s*(?:[0-9]{1,2}[\\.\\)]|\\([A-Z0-9]{1,2}\\))|\\n\\s*(?::|F)[0-9]{2})[\\s\\S])';
 
   const discRegex = new RegExp(
     `(?:` +
-      `${clausePrefix}\\s*(?:A\\s+)?(?:FEE|CHARGE|COST|COMMISSION|EXPENSE|AN?\\s+AMOUNT)\\s+(?:OF\\s+)?(?:USD|EUR|GBP)?\\s*\\d+[\\s\\S]*?DISCREPA[A-Z]*[\\s\\S]*?${conditionBoundary}` +
-      `|${clausePrefix}\\s*(?:(?:A\\s+)?(?:IN\\s+CASE\\s+OF\\s+)?DISCREPA[A-Z]*\\s*(?:FEE|CHARGE|COMMISSION|COST|DOCUMENTS?)?)[\\s\\S]*?${conditionBoundary}` +
-      `|${clausePrefix}\\s*(?:(?:WE\\s+)?(?:WILL|SHALL)\\s+(?:BE\\s+)?DEDUCT(?:ED)?)[\\s\\S]*?DISCREPA[A-Z]*[\\s\\S]*?${conditionBoundary}` +
+      `${clausePrefix}\\s*(?:(?:A\\s+)?(?:IN\\s+CASE\\s+OF\\s+)?DISCREPA[A-Z]*\\s*(?:FEE|CHARGE|COMMISSION|COST|DOCUMENTS?)?)[\\s\\S]*?${conditionBoundary}` +
+      `|${clausePrefix}\\s*(?:A\\s+)?(?:FEE|CHARGE|COST|COMMISSION|EXPENSE|AN?\\s+AMOUNT)\\s+(?:OF\\s+)?(?:USD|EUR|GBP)?\\s*\\d+${sameConditionChar}{0,120}?DISCREPA[A-Z]*[\\s\\S]*?${conditionBoundary}` +
+      `|${clausePrefix}\\s*(?:(?:WE\\s+)?(?:WILL|SHALL)\\s+(?:BE\\s+)?DEDUCT(?:ED)?)${sameConditionChar}{0,120}?DISCREPA[A-Z]*[\\s\\S]*?${conditionBoundary}` +
     `)`,
     'i'
   );
@@ -545,13 +567,13 @@ export function auditLcText(text: string, settings?: UserSettings): LcAuditResul
   }
 
   // 2. PAYMENT / REIMBURSEMENT / SETTLEMENT / FUND TRANSFER / RTGS CHARGES AUDIT:
-  const paymentFeeRegex = /(?:PAYMENT|REIMBURSEMENT|SETTLEMENT|DOCUMENT\s*SETTLEMENT|FUND\s*TRANSFER|RTGS|L\/?C\s*PAYMENT)[\s\S]{0,40}?(?:CHARGE|COMMISSION|FEE|COST|EXPENSE|OF\s+USD|AT\s+USD|ATTRACT)/i;
+  const paymentFeeRegex = /(?:PAYMENT|REIMBURSE?MENT|SETTLEMENT|DOCUMENT\s*SETTLEMENT|FUND\s*TRANSFER|RTGS|L\/?C\s*PAYMENT)[\s\S]{0,45}?(?:CHARGE|COMMISSION|FEE|COST|EXPENSE|OF\s+USD|AT\s+USD|ATTRACT)/i;
   const paymentDeductRegex = /(?:(?:WE\s+)?(?:WILL|SHALL)\s+BE\s+DEDUCTED|WE\s+WILL\s+DEDUCT|DEDUCTED\s+FROM\s+(?:THE\s+)?BILL\s+VALUE)[\s\S]{1,60}?(?:AT\s+THE\s+TIME\s+OF\s+PAYMENT|PAYMENT)/i;
   const docSettlementRegex = /(?:AN\s+AMOUNT\s+OF\s+)?(?:USD|EUR|GBP)?\s*[\d.]+\s+AS\s+(?:DOCUMENT\s+)?SETTLEMENT/i;
   const hasAnyPaymentFeeMention = paymentFeeRegex.test(textWithout71D) ||
                                   paymentDeductRegex.test(textWithout71D) ||
                                   docSettlementRegex.test(textWithout71D) ||
-                                  /DEDUCT\s+(?:PAYMENT|SETTLEMENT|REIMBURSEMENT)\s+CHARGE/i.test(textWithout71D) ||
+                                  /DEDUCT\s+(?:PAYMENT|SETTLEMENT|REIMBURSE?MENT)\s+CHARGE/i.test(textWithout71D) ||
                                   Boolean(chargesBlock && /(?:REIMBURS|PAYMENT|SETTLEMENT|RTGS|FUND\s*TRANSFER|HANDLING)/i.test(chargesBlock));
 
   let totalPaymentFeeBeneficiary = 0;
@@ -560,9 +582,9 @@ export function auditLcText(text: string, settings?: UserSettings): LcAuditResul
 
   if (hasAnyPaymentFeeMention) {
     const paymentRegexGlobal = new RegExp(
-      `${clausePrefix}(?:(?:EACH\\s+)?(?:L\\/?C\\s+)?(?:PAYMENT|SETTLEMENT|REIMBURSEMENT|DOCUMENT\\s*SETTLEMENT|FUND\\s*TRANSFER|RTGS)[\\s\\S]{0,40}?(?:CHARGE|COMMISSION|FEE|COST|EXPENSE|ATTRACT)[S]?[\\s\\S]*?${conditionBoundary})` +
+      `${clausePrefix}(?:(?:EACH\\s+)?(?:L\\/?C\\s+)?(?:PAYMENT|SETTLEMENT|REIMBURSE?MENT|DOCUMENT\\s*SETTLEMENT|FUND\\s*TRANSFER|RTGS)[\\s\\S]{0,45}?(?:CHARGE|COMMISSION|FEE|COST|EXPENSE|ATTRACT)[S]?[\\s\\S]*?${conditionBoundary})` +
       `|${clausePrefix}(?:AT\\s+THE\\s+TIME\\s+OF\\s+PAYMENT[\\s\\S]{1,60}?(?:WE\\s+)?(?:WILL|SHALL)\\s+(?:BE\\s+)?DEDUCT(?:ED)?)[\\s\\S]*?${conditionBoundary}` +
-      `|${clausePrefix}(?:(?:WE\\s+)?(?:WILL|SHALL)\\s+(?:BE\\s+)?DEDUCT(?:ED)?[\\s\\S]{1,60}?AS\\s+(?:PAYMENT|SETTLEMENT|REIMBURSEMENT)\\s+(?:FEE|CHARGE)[S]?)[\\s\\S]*?${conditionBoundary}` +
+      `|${clausePrefix}(?:(?:WE\\s+)?(?:WILL|SHALL)\\s+(?:BE\\s+)?DEDUCT(?:ED)?[\\s\\S]{1,60}?AS\\s+(?:PAYMENT|SETTLEMENT|REIMBURSE?MENT)\\s+(?:FEE|CHARGE)[S]?)[\\s\\S]*?${conditionBoundary}` +
       `|(?:(?:AN\\s+AMOUNT\\s+OF\\s+)?(?:USD|EUR|GBP)?\\s*[\\d.]+\\s+AS\\s+(?:DOCUMENT\\s+)?SETTLEMENT[\\s\\S]*?${conditionBoundary})`,
       'gi'
     );
@@ -1026,11 +1048,13 @@ export function auditLcText(text: string, settings?: UserSettings): LcAuditResul
     upper.includes("CERTIFICATE SIGNED BY BUYER") ||
     upper.includes("APPLICANT'S CERTIFICATE") ||
     upper.includes("APPLICANTS CERTIFICATE") ||
+    upper.includes("APPLICANT CERTIFICATE") ||
     upper.includes("BUYER'S CERTIFICATE") ||
-    (upper.includes("COUNTER-SIGNED BY") && (upper.includes("APPLICANT") || upper.includes("BUYER") || upper.includes("MANAGING DIRECTOR")))
+    upper.includes("BUYER CERTIFICATE") ||
+    /(?:COUNTER-?SIGNED|SIGNED)\s+BY\s+(?:THE\s+)?(?:APPLICANT|BUYER|MANAGING\s+DIRECTOR|CHAIRMAN)/i.test(normalizedText)
   ) {
-    const snippet = extractSnippet(normalizedText, /(?:APPLICANT|BUYER)['S ]*(?:INSPECTION\s+)?CERTIFICATE[^\n.]{0,100}/i) ||
-                    extractSnippet(normalizedText, /COUNTER-SIGNED\s+BY[^\n.]{0,100}/i);
+    const snippet = extractSnippet(normalizedText, /(?:APPLICANT|BUYER)(?:'S|S)?\s+(?:INSPECTION\s+)?CERTIFICATE[^\n.]{0,100}/i) ||
+                    extractSnippet(normalizedText, /(?:COUNTER-?SIGNED|SIGNED)\s+BY\s+(?:THE\s+)?(?:APPLICANT|BUYER|MANAGING\s+DIRECTOR|CHAIRMAN)[^\n.]{0,100}/i);
     issues.push({
       id: 'issue_applicant_certificate',
       correctionId: 'physical_verification_clause',
@@ -1200,13 +1224,13 @@ export function auditLcText(text: string, settings?: UserSettings): LcAuditResul
   const upperBody = relevantLcBody.toUpperCase();
 
   const hasOverdueClause =
-    /OVER\s*DUE\s*(?:INTEREST|CHARGE|CLAUSE|RATE|COMMISSION)/i.test(relevantLcBody) ||
-    /OVER\s*DUE[\s\S]{0,30}?\d+(?:\.\d+)?%/i.test(relevantLcBody) ||
-    /OVER\s*DUE[\s\S]{0,50}?(?:MATURITY|PER\s+ANNUM|P\.A\.|ACCEPTANCE)/i.test(relevantLcBody) ||
+    /OVER\s*DUE\s*(?:INTEREST|CHARGE|CLAUSE|RATE|COMMISSION|PERIOD)/i.test(relevantLcBody) ||
+    /OVER\s*DUE[\s\S]{0,40}?(?:\d+(?:\.\d+)?%|MATURITY|PER\s+ANNUM|P\.?A\.?|ACCEPTANCE)/i.test(relevantLcBody) ||
+    /(?:\d+(?:\.\d+)?%|PER\s+ANNUM|P\.?A\.?|INTEREST|ADDITIONAL\s+AMOUNT)[\s\S]{0,60}?OVER\s*DUE/i.test(relevantLcBody) ||
     /(?:DELAYED\s+PAYMENT|LATE\s+PAYMENT)\s+INTEREST/i.test(relevantLcBody) ||
     /INTEREST\s+(?:FOR|ON)\s+DELAYED\s+PAYMENT/i.test(relevantLcBody) ||
     /INTEREST\s+BEYOND\s+MATURITY/i.test(relevantLcBody) ||
-    (upperBody.includes('OVERDUE') && (upperBody.includes('RATE') || upperBody.includes('PAY') || upperBody.includes('MATURITY')));
+    (/OVER\s*DUE/i.test(relevantLcBody) && (upperBody.includes('RATE') || upperBody.includes('PAY') || upperBody.includes('PAID') || upperBody.includes('MATURITY') || upperBody.includes('PERIOD') || upperBody.includes('%')));
 
   // Check for benchmark interest terms like SOFR / LIBOR
   const hasBenchmarkInterest = upperBody.includes('SOFR') ||
