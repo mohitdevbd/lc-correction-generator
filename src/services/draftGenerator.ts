@@ -220,7 +220,7 @@ Thank you.`;
       .join('\n\n');
 
     let additionalRemarkBlock = '';
-    if (details.additionalNote?.trim() && !selectedCorrectionIds.includes('overdue_clause') && !selectedCorrectionIds.includes('physical_verification_clause')) {
+    if (details.additionalNote?.trim() && !selectedCorrectionIds.includes('overdue_clause') && !selectedCorrectionIds.includes('physical_verification_clause') && !selectedCorrectionIds.includes('applicant_certificate')) {
       additionalRemarkBlock = `\n\nCommercial Note: ${details.additionalNote.trim()}`;
     }
 
@@ -445,7 +445,7 @@ ${signature}`;
       .join('\n\n');
 
     let additionalRemarkBlock = '';
-    if (details.additionalNote?.trim() && !allSelectedIds.includes('overdue_clause') && !allSelectedIds.includes('physical_verification_clause')) {
+    if (details.additionalNote?.trim() && !allSelectedIds.includes('overdue_clause') && !allSelectedIds.includes('physical_verification_clause') && !allSelectedIds.includes('applicant_certificate')) {
       additionalRemarkBlock = `\n\nCommercial Note: ${details.additionalNote.trim()}`;
     }
 

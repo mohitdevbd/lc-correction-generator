@@ -1,4 +1,16 @@
-import type { CorrectionTemplate } from '../types';
+import type { CorrectionTemplate, AdditionalDetails } from '../types';
+
+export function getClauseRef(details?: AdditionalDetails, templateId?: string, defaultFallback?: string): string {
+  if (!details) return defaultFallback || '';
+  if (templateId && details.clauseLocations?.[templateId]) {
+    return details.clauseLocations[templateId].trim();
+  }
+  if (details.clauseNumber && details.clauseNumber.trim()) {
+    const cn = details.clauseNumber.trim();
+    return cn.startsWith('Clause') || cn.startsWith('Field') ? cn : `Clause ${cn}`;
+  }
+  return defaultFallback || '';
+}
 
 export const CORRECTION_TEMPLATES: CorrectionTemplate[] = [
   {
@@ -9,20 +21,24 @@ export const CORRECTION_TEMPLATES: CorrectionTemplate[] = [
     icon: 'ClockAlert',
     relevantFields: ['additionalNote'],
     emailTemplate: (details) => {
+      const clauseRef = getClauseRef(details, 'overdue_clause');
+      const targetPhrase = clauseRef && clauseRef !== 'Field 47A' ? ` in ${clauseRef}` : ' in the LC';
       const note = details.additionalNote?.trim();
       const isGenuineOverdueNote = note && /overdue|interest|penalty|delayed\s+payment/i.test(note) && !/cable|swift|charge\s+usd/i.test(note);
       if (isGenuineOverdueNote) {
-        return `Please add an overdue clause in the LC as follows: "${note}".`;
+        return `Please add an overdue clause${targetPhrase} as follows: "${note}".`;
       }
-      return 'Please add an overdue interest clause in the LC as per the agreed terms/PI.';
+      return `Please add an overdue interest clause${targetPhrase} as per the agreed terms/PI.`;
     },
     messageTemplate: (details) => {
+      const clauseRef = getClauseRef(details, 'overdue_clause');
+      const targetPhrase = clauseRef && clauseRef !== 'Field 47A' ? ` in ${clauseRef}` : '';
       const note = details.additionalNote?.trim();
       const isGenuineOverdueNote = note && /overdue|interest|penalty|delayed\s+payment/i.test(note) && !/cable|swift|charge\s+usd/i.test(note);
       if (isGenuineOverdueNote) {
-        return `Add overdue clause (${note}).`;
+        return `Add overdue clause${targetPhrase} (${note}).`;
       }
-      return 'Add overdue interest clause as per agreed terms.';
+      return `Add overdue interest clause${targetPhrase} as per agreed terms.`;
     }
   },
   {
@@ -33,16 +49,20 @@ export const CORRECTION_TEMPLATES: CorrectionTemplate[] = [
     icon: 'CreditCard',
     relevantFields: ['additionalNote'],
     emailTemplate: (details) => {
+      const clauseRef = getClauseRef(details, 'payment_clause');
+      const targetPhrase = clauseRef && clauseRef !== 'Field 47A' ? ` in ${clauseRef}` : ' in the LC';
       if (details.additionalNote?.trim()) {
-        return `Please add a payment clause in the LC as follows: "${details.additionalNote.trim()}".`;
+        return `Please add a payment clause${targetPhrase} as follows: "${details.additionalNote.trim()}".`;
       }
-      return 'Please add a payment clause in the LC as per the agreed terms/PI.';
+      return `Please add a payment clause${targetPhrase} as per the agreed terms/PI.`;
     },
     messageTemplate: (details) => {
+      const clauseRef = getClauseRef(details, 'payment_clause');
+      const targetPhrase = clauseRef && clauseRef !== 'Field 47A' ? ` in ${clauseRef}` : '';
       if (details.additionalNote?.trim()) {
-        return `Add payment clause: ${details.additionalNote.trim()}.`;
+        return `Add payment clause${targetPhrase}: ${details.additionalNote.trim()}.`;
       }
-      return 'Add payment clause in the LC as per agreed terms/PI.';
+      return `Add payment clause${targetPhrase} in the LC as per agreed terms/PI.`;
     }
   },
   {
@@ -53,18 +73,22 @@ export const CORRECTION_TEMPLATES: CorrectionTemplate[] = [
     icon: 'ArrowRightLeft',
     relevantFields: ['maxChargeAmount', 'currency'],
     emailTemplate: (details, settings) => {
+      const clauseRef = getClauseRef(details, 'fund_transfer_charges');
+      const targetPhrase = clauseRef ? ` in ${clauseRef}` : ' in the LC';
       const curr = details.currency || settings.defaultCurrency || 'USD';
       if (details.maxChargeAmount?.trim()) {
-        return `Please clearly specify in the LC the applicable fund transfer charges. The deduction should not exceed ${curr} ${details.maxChargeAmount.trim()}.`;
+        return `Please amend the fund transfer charges${targetPhrase}. The deduction should not exceed ${curr} ${details.maxChargeAmount.trim()}.`;
       }
-      return 'Please clearly specify in the LC the applicable fund transfer charges to be deducted.';
+      return `Please clearly specify${targetPhrase} the applicable fund transfer charges to be deducted.`;
     },
     messageTemplate: (details, settings) => {
+      const clauseRef = getClauseRef(details, 'fund_transfer_charges');
+      const targetPhrase = clauseRef ? ` in ${clauseRef}` : '';
       const curr = details.currency || settings.defaultCurrency || 'USD';
       if (details.maxChargeAmount?.trim()) {
-        return `Fund transfer charges must not exceed ${curr} ${details.maxChargeAmount.trim()}.`;
+        return `Fund transfer charges${targetPhrase} must not exceed ${curr} ${details.maxChargeAmount.trim()}.`;
       }
-      return 'Clearly specify applicable fund transfer charges in LC.';
+      return `Clearly specify applicable fund transfer charges${targetPhrase} in LC.`;
     }
   },
   {
@@ -75,22 +99,26 @@ export const CORRECTION_TEMPLATES: CorrectionTemplate[] = [
     icon: 'ShieldAlert',
     relevantFields: ['maxChargeAmount', 'currency'],
     emailTemplate: (details, settings) => {
+      const clauseRef = getClauseRef(details, 'discrepancy_charges');
+      const targetPhrase = clauseRef ? ` in ${clauseRef}` : ' in the LC';
       const curr = details.currency || settings.defaultCurrency || 'USD';
       const maxAmt = details.maxChargeAmount?.trim() || details.acceptableDiscrepancyCharge?.trim() || '25.00';
       if (details.discrepancyChargeInLc?.trim()) {
-        return `The discrepancy handling charge in the LC is ${curr} ${details.discrepancyChargeInLc.trim()}, which exceeds our acceptable limit. Please amend the discrepancy handling charge so that it does not exceed ${curr} ${maxAmt}. Charges exceeding this limit will not be acceptable.`;
+        return `The discrepancy handling charge${targetPhrase} is ${curr} ${details.discrepancyChargeInLc.trim()}, which exceeds our acceptable limit. Please amend the discrepancy handling charge so that it does not exceed ${curr} ${maxAmt}. Charges exceeding this limit will not be acceptable.`;
       }
       if (details.maxChargeAmount?.trim()) {
-        return `The discrepancy handling charge should not exceed ${curr} ${details.maxChargeAmount.trim()}. Charges exceeding this agreed limit will not be acceptable.`;
+        return `The discrepancy handling charge${targetPhrase} should not exceed ${curr} ${details.maxChargeAmount.trim()}. Charges exceeding this agreed limit will not be acceptable.`;
       }
-      return 'Please specify the discrepancy handling charges in the LC. Charges exceeding the agreed limit will not be acceptable.';
+      return `Please specify the discrepancy handling charges${targetPhrase}. Charges exceeding the agreed limit will not be acceptable.`;
     },
     messageTemplate: (details, settings) => {
+      const clauseRef = getClauseRef(details, 'discrepancy_charges');
+      const targetPhrase = clauseRef ? ` (${clauseRef})` : '';
       const curr = details.currency || settings.defaultCurrency || 'USD';
       if (details.maxChargeAmount?.trim()) {
-        return `Discrepancy charge must not exceed ${curr} ${details.maxChargeAmount.trim()}.`;
+        return `Discrepancy charge${targetPhrase} must not exceed ${curr} ${details.maxChargeAmount.trim()}.`;
       }
-      return 'Limit discrepancy handling charges as per agreed rate.';
+      return `Limit discrepancy handling charges${targetPhrase} as per agreed rate.`;
     }
   },
   {
@@ -101,18 +129,22 @@ export const CORRECTION_TEMPLATES: CorrectionTemplate[] = [
     icon: 'Receipt',
     relevantFields: ['maxChargeAmount', 'currency'],
     emailTemplate: (details, settings) => {
+      const clauseRef = getClauseRef(details, 'payment_processing_charges');
+      const targetPhrase = clauseRef ? ` in ${clauseRef}` : ' in the LC';
       const curr = details.currency || settings.defaultCurrency || 'USD';
       if (details.maxChargeAmount?.trim()) {
-        return `The payment processing charge should not exceed ${curr} ${details.maxChargeAmount.trim()}.`;
+        return `The payment processing charge${targetPhrase} should not exceed ${curr} ${details.maxChargeAmount.trim()}.`;
       }
-      return 'Please specify that payment processing charges should be for the account of the applicant or strictly limited as agreed.';
+      return `Please amend ${clauseRef || 'the LC'} to specify that payment processing charges should be for the account of the applicant or strictly limited as agreed.`;
     },
     messageTemplate: (details, settings) => {
+      const clauseRef = getClauseRef(details, 'payment_processing_charges');
+      const targetPhrase = clauseRef ? ` (${clauseRef})` : '';
       const curr = details.currency || settings.defaultCurrency || 'USD';
       if (details.maxChargeAmount?.trim()) {
-        return `Payment processing fee limit: ${curr} ${details.maxChargeAmount.trim()}.`;
+        return `Payment processing fee limit${targetPhrase}: ${curr} ${details.maxChargeAmount.trim()}.`;
       }
-      return 'Specify payment processing charge limit.';
+      return `Specify payment processing charge limit${targetPhrase}.`;
     }
   },
   {
@@ -123,18 +155,22 @@ export const CORRECTION_TEMPLATES: CorrectionTemplate[] = [
     icon: 'Coins',
     relevantFields: ['maxChargeAmount', 'currency'],
     emailTemplate: (details, settings) => {
+      const clauseRef = getClauseRef(details, 'total_bank_charges_limit');
+      const targetPhrase = clauseRef ? ` in ${clauseRef}` : '';
       const curr = details.currency || settings.defaultCurrency || 'USD';
       if (details.maxChargeAmount?.trim()) {
-        return `The total amount of all applicable bank charges, including discrepancy handling, reimbursement commission, payment charges, and any other bill deductions, should not exceed ${curr} ${details.maxChargeAmount.trim()} in total.`;
+        return `The total amount of all applicable bank charges${targetPhrase}, including discrepancy handling, reimbursement commission, payment charges, and any other bill deductions, should not exceed ${curr} ${details.maxChargeAmount.trim()} in total.`;
       }
-      return 'The total amount of all applicable bank charges, including discrepancy handling, reimbursement commission, payment charges, and any other bill deductions, should not exceed the agreed ceiling amount in total.';
+      return `The total amount of all applicable bank charges${targetPhrase}, including discrepancy handling, reimbursement commission, payment charges, and any other bill deductions, should not exceed the agreed ceiling amount in total.`;
     },
     messageTemplate: (details, settings) => {
+      const clauseRef = getClauseRef(details, 'total_bank_charges_limit');
+      const targetPhrase = clauseRef ? ` (${clauseRef})` : '';
       const curr = details.currency || settings.defaultCurrency || 'USD';
       if (details.maxChargeAmount?.trim()) {
-        return `Cap total bank charges (discrepancy, reimbursement, payment) at max ${curr} ${details.maxChargeAmount.trim()}.`;
+        return `Cap total bank charges${targetPhrase} (discrepancy, reimbursement, payment) at max ${curr} ${details.maxChargeAmount.trim()}.`;
       }
-      return 'Add overall ceiling clause for total bank charges.';
+      return `Add overall ceiling clause${targetPhrase} for total bank charges.`;
     }
   },
   {
@@ -144,11 +180,13 @@ export const CORRECTION_TEMPLATES: CorrectionTemplate[] = [
     shortDescription: 'Outside Bangladesh bank charges on applicant account',
     icon: 'Building2',
     relevantFields: ['maxChargeAmount'],
-    emailTemplate: () => {
-      return `Please amend Field 71D to read as: "All banking charges outside Bangladesh are for applicant's account." Beneficiary will bear only standard discrepancy and payment charges. All other bank charges are on applicant's account.`;
+    emailTemplate: (details) => {
+      const clauseRef = getClauseRef(details, 'clause_71d_bank_charges', 'Field 71D');
+      return `Please amend ${clauseRef} to read as: "All banking charges outside Bangladesh are for applicant's account." Beneficiary will bear only standard discrepancy and payment charges. All other bank charges are on applicant's account.`;
     },
-    messageTemplate: () => {
-      return `Amend Field 71D: all charges outside Bangladesh on applicant's account.`;
+    messageTemplate: (details) => {
+      const clauseRef = getClauseRef(details, 'clause_71d_bank_charges', 'Field 71D');
+      return `Amend ${clauseRef}: all charges outside Bangladesh on applicant's account.`;
     }
   },
   {
@@ -159,6 +197,8 @@ export const CORRECTION_TEMPLATES: CorrectionTemplate[] = [
     icon: 'Receipt',
     relevantFields: ['discrepancyChargeInLc', 'paymentChargeInLc', 'acceptableDiscrepancyCharge', 'acceptablePaymentCharge', 'additionalNote'],
     emailTemplate: (details) => {
+      const clauseRef = getClauseRef(details, 'discrepancy_payment_charges_revision');
+      const targetPhrase = clauseRef ? ` in ${clauseRef}` : '';
       const discInLc = details.discrepancyChargeInLc?.trim();
       const payInLc = details.paymentChargeInLc?.trim();
       const accDisc = details.acceptableDiscrepancyCharge?.trim() || '25.00';
@@ -170,32 +210,34 @@ export const CORRECTION_TEMPLATES: CorrectionTemplate[] = [
       // Case 1: Both Discrepancy and Payment have specific numeric amounts in LC that exceed limits (e.g. 50.00 & 30.00)
       if (hasSpecificDisc && hasSpecificPay) {
         const extraNote = details.additionalNote?.trim() ? ` (${details.additionalNote.trim()})` : '';
-        return `We request that you revise the discrepancy and payment charge clauses. Your discrepancy charge of USD ${discInLc} and payment charge of USD ${payInLc}${extraNote} are higher than what we can accept. Our acceptable charges are max USD ${accDisc} for discrepancies and max USD ${accPay} for payment, and all bank charges combined must not exceed USD 50.00 in total.`;
+        return `Please amend the discrepancy and payment charge clause${targetPhrase}. Your discrepancy charge of USD ${discInLc} and payment charge of USD ${payInLc}${extraNote} are higher than what we can accept. Our acceptable charges are max USD ${accDisc} for discrepancies and max USD ${accPay} for payment, and all bank charges combined must not exceed USD 50.00 in total.`;
       }
 
       // Case 2: Only discrepancy has specific amount
       if (hasSpecificDisc && !hasSpecificPay) {
-        return `We request that you revise the discrepancy charge clause. Your discrepancy charge of USD ${discInLc} is higher than what we can accept. Our acceptable charge is max USD ${accDisc} for discrepancies.`;
+        return `Please amend the discrepancy charge clause${targetPhrase}. Your discrepancy charge of USD ${discInLc} is higher than what we can accept. Our acceptable charge is max USD ${accDisc} for discrepancies.`;
       }
 
       // Case 3: Only payment has specific amount
       if (!hasSpecificDisc && hasSpecificPay) {
-        return `We request that you revise the payment charge clause. Your payment charge of USD ${payInLc} is higher than what we can accept. Our acceptable charge is max USD ${accPay} for payment processing.`;
+        return `Please amend the payment charge clause${targetPhrase}. Your payment charge of USD ${payInLc} is higher than what we can accept. Our acceptable charge is max USD ${accPay} for payment processing.`;
       }
 
       // Case 4: Neither has specific clause/amount defined in LC conditions (Missing in LC or Unspecified in Field 71D)
-      return `Please add the discrepancy and payment charge clause in the LC as per the agreed terms/PI. Both charges combined must not exceed USD 50.00 (with discrepancy handling charge max USD ${accDisc} and payment processing charge max USD ${accPay}).`;
+      return `Please add the discrepancy and payment charge clause${targetPhrase ? ` in ${clauseRef}` : ' in the LC'} as per the agreed terms/PI. Both charges combined must not exceed USD 50.00 (with discrepancy handling charge max USD ${accDisc} and payment processing charge max USD ${accPay}).`;
     },
     messageTemplate: (details) => {
+      const clauseRef = getClauseRef(details, 'discrepancy_payment_charges_revision');
+      const targetPhrase = clauseRef ? ` in ${clauseRef}` : '';
       const accDisc = details.acceptableDiscrepancyCharge?.trim() || '25.00';
       const accPay = details.acceptablePaymentCharge?.trim() || '25.00';
       const hasSpecificDisc = details.discrepancyChargeInLc && details.discrepancyChargeInLc !== 'Missing' && details.discrepancyChargeInLc !== 'Unspecified';
       const hasSpecificPay = details.paymentChargeInLc && details.paymentChargeInLc !== 'Missing' && details.paymentChargeInLc !== 'Unspecified';
 
       if (hasSpecificDisc || hasSpecificPay) {
-        return `Revise charges to acceptable limits: max USD ${accDisc} for discrepancy, max USD ${accPay} for payment, combined total max USD 50.00.`;
+        return `Revise charges${targetPhrase} to acceptable limits: max USD ${accDisc} for discrepancy, max USD ${accPay} for payment, combined total max USD 50.00.`;
       }
-      return `Add Discrepancy & Payment charge clause: max USD ${accDisc} for discrepancy, max USD ${accPay} for payment, combined total max USD 50.00.`;
+      return `Add Discrepancy & Payment charge clause${targetPhrase}: max USD ${accDisc} for discrepancy, max USD ${accPay} for payment, combined total max USD 50.00.`;
     }
   },
   {
@@ -395,17 +437,29 @@ export const CORRECTION_TEMPLATES: CorrectionTemplate[] = [
     shortDescription: 'Delete physical goods verification / inspection condition',
     icon: 'ShieldOff',
     relevantFields: ['clauseNumber', 'additionalNote'],
-    emailTemplate: (details, _, allSelectedIds) => {
-      const clauseNo = details.clauseNumber?.trim() || 'the clause';
-      const hasAcceptance = allSelectedIds?.includes('acceptance_clause') || allSelectedIds?.includes('acceptance_after_receipt_deletion');
-      if (hasAcceptance) {
-        return `Please delete ${clauseNo} regarding physical verification. Acceptance should not be subject to physical receipt of goods or verification by the applicant's bank officials.`;
-      }
-      return `Please delete ${clauseNo} regarding physical verification. Payment/acceptance must be strictly against compliant documents as per UCP 600.`;
+    emailTemplate: (details) => {
+      const clauseRef = getClauseRef(details, 'physical_verification_clause') || 'the clause';
+      return `Please completely delete ${clauseRef} regarding physical verification of goods as we do not allow any physical verification condition. In accordance with UCP 600, payment and bill acceptance must be strictly issued against compliant shipping documents, and cannot be made conditional upon physical arrival, verification, or inspection of goods.`;
     },
     messageTemplate: (details) => {
-      const clauseNo = details.clauseNumber?.trim() || 'the clause';
-      return `Delete ${clauseNo} (physical verification condition).`;
+      const clauseRef = getClauseRef(details, 'physical_verification_clause') || 'the clause';
+      return `Delete ${clauseRef} (physical verification condition not allowed under UCP 600).`;
+    }
+  },
+  {
+    id: 'applicant_certificate',
+    title: 'Applicant Inspection / Certificate Clause – Delete',
+    category: 'clauses',
+    shortDescription: 'Delete buyer inspection certificate / delivery sign requirement for negotiation',
+    icon: 'ShieldOff',
+    relevantFields: ['clauseNumber', 'additionalNote'],
+    emailTemplate: (details) => {
+      const clauseRef = getClauseRef(details, 'applicant_certificate') || 'the clause';
+      return `Please delete ${clauseRef} requiring an Inspection Certificate (IC) or document signed/countersigned by the applicant/buyer. Negotiation and payment should not be conditional upon buyer's signature or inspection certificate, in accordance with UCP 600.`;
+    },
+    messageTemplate: (details) => {
+      const clauseRef = getClauseRef(details, 'applicant_certificate') || 'the clause';
+      return `Delete ${clauseRef} (applicant inspection certificate / counter-signature requirement).`;
     }
   },
   {
@@ -415,11 +469,13 @@ export const CORRECTION_TEMPLATES: CorrectionTemplate[] = [
     shortDescription: 'Remove applicant bank officials verification requirement',
     icon: 'ShieldOff',
     relevantFields: ['additionalNote'],
-    emailTemplate: () => {
-      return `Please delete the clause requiring an inspection or verification report from the applicant's bank officials. Payment and acceptance must be strictly against compliant shipping documents as per UCP 600.`;
+    emailTemplate: (details) => {
+      const clauseRef = getClauseRef(details, 'bank_verification_report_deletion') || 'the clause';
+      return `Please delete ${clauseRef} requiring an inspection or verification report from the applicant's bank officials. Payment and acceptance must be strictly against compliant shipping documents as per UCP 600.`;
     },
-    messageTemplate: () => {
-      return `Delete applicant bank verification report clause.`;
+    messageTemplate: (details) => {
+      const clauseRef = getClauseRef(details, 'bank_verification_report_deletion') || 'the clause';
+      return `Delete ${clauseRef} (applicant bank verification report clause).`;
     }
   },
   {
@@ -429,11 +485,15 @@ export const CORRECTION_TEMPLATES: CorrectionTemplate[] = [
     shortDescription: 'Ensure acceptance is issued unconditionally upon compliant documents',
     icon: 'CheckCheck',
     relevantFields: ['additionalNote'],
-    emailTemplate: () => {
-      return 'Please amend the acceptance clause to confirm that acceptance and maturity acknowledgement shall be issued unconditionally upon receipt of compliant shipping documents, without being conditional upon customs clearance or physical goods inspection.';
+    emailTemplate: (details) => {
+      const clauseRef = getClauseRef(details, 'acceptance_clause');
+      const target = clauseRef ? ` in ${clauseRef}` : ' in the LC';
+      return `Please amend the acceptance clause${target} to confirm that acceptance and maturity acknowledgement shall be issued unconditionally upon receipt of compliant shipping documents, without being conditional upon customs clearance or physical goods inspection.`;
     },
-    messageTemplate: () => {
-      return 'Amend acceptance condition to standard UCP 600 compliant document basis.';
+    messageTemplate: (details) => {
+      const clauseRef = getClauseRef(details, 'acceptance_clause');
+      const target = clauseRef ? ` (${clauseRef})` : '';
+      return `Amend acceptance condition${target} to standard UCP 600 compliant document basis.`;
     }
   },
   {
@@ -443,11 +503,15 @@ export const CORRECTION_TEMPLATES: CorrectionTemplate[] = [
     shortDescription: 'Remove condition requiring physical receipt prior to acceptance',
     icon: 'ShieldOff',
     relevantFields: ['additionalNote'],
-    emailTemplate: () => {
-      return 'Please remove the condition requiring physical receipt of goods prior to bill acceptance. In accordance with UCP 600, bill acceptance and maturity acknowledgement must be issued solely upon presentation of compliant documents.';
+    emailTemplate: (details) => {
+      const clauseRef = getClauseRef(details, 'acceptance_after_receipt_deletion');
+      const target = clauseRef ? ` ${clauseRef}` : ' the condition';
+      return `Please delete${target} requiring physical receipt of goods prior to bill acceptance. In accordance with UCP 600, bill acceptance and maturity acknowledgement must be issued solely upon presentation of compliant documents.`;
     },
-    messageTemplate: () => {
-      return 'Remove requirement of physical receipt of goods prior to acceptance.';
+    messageTemplate: (details) => {
+      const clauseRef = getClauseRef(details, 'acceptance_after_receipt_deletion');
+      const target = clauseRef ? ` (${clauseRef})` : '';
+      return `Remove requirement of physical receipt of goods prior to acceptance${target}.`;
     }
   },
   {
@@ -458,19 +522,23 @@ export const CORRECTION_TEMPLATES: CorrectionTemplate[] = [
     icon: 'Timer',
     relevantFields: ['currentTenor', 'requiredTenor'],
     emailTemplate: (details) => {
+      const clauseRef = getClauseRef(details, 'draft_tenor_correction', 'Field 42C');
+      const targetPhrase = clauseRef ? ` in ${clauseRef}` : ' in the LC';
       if (details.currentTenor?.trim() && details.requiredTenor?.trim()) {
-        return `The PI specifies payment at ${details.requiredTenor.trim()}, whereas the LC mentions a ${details.currentTenor.trim()} tenor. Please amend the LC draft tenor to reflect ${details.requiredTenor.trim()} as agreed.`;
+        return `The PI specifies payment at ${details.requiredTenor.trim()}, whereas ${clauseRef || 'the LC'} mentions a ${details.currentTenor.trim()} tenor. Please amend the draft tenor${targetPhrase} to reflect ${details.requiredTenor.trim()} as agreed.`;
       }
       if (details.requiredTenor?.trim()) {
-        return `Please correct the tenor in the LC to read: ${details.requiredTenor.trim()} as per the agreed PI/payment terms.`;
+        return `Please correct the tenor${targetPhrase} to read: ${details.requiredTenor.trim()} as per the agreed PI/payment terms.`;
       }
-      return 'Please correct the tenor in the LC as per the agreed PI/payment terms.';
+      return `Please correct the tenor${targetPhrase} as per the agreed PI/payment terms.`;
     },
     messageTemplate: (details) => {
+      const clauseRef = getClauseRef(details, 'draft_tenor_correction');
+      const target = clauseRef ? ` (${clauseRef})` : '';
       if (details.requiredTenor?.trim()) {
-        return `Amend draft tenor to: ${details.requiredTenor.trim()}.`;
+        return `Amend draft tenor${target} to: ${details.requiredTenor.trim()}.`;
       }
-      return 'Correct tenor to match agreed PI.';
+      return `Correct tenor${target} to match agreed PI.`;
     }
   },
   {
@@ -619,16 +687,20 @@ export const CORRECTION_TEMPLATES: CorrectionTemplate[] = [
     icon: 'Split',
     relevantFields: ['additionalNote'],
     emailTemplate: (details) => {
+      const clauseRef = getClauseRef(details, 'partial_payment_not_allowed');
+      const targetPhrase = clauseRef ? ` in ${clauseRef}` : ' in the LC';
       if (details.additionalNote?.trim()) {
-        return `Please amend the LC to allow partial payment/drawings: "${details.additionalNote.trim()}". Currently, partial payment or drawing is restricted in the LC.`;
+        return `Please amend the LC to allow partial payment/drawings${targetPhrase}: "${details.additionalNote.trim()}". Currently, partial payment or drawing is restricted in the LC.`;
       }
-      return 'Please amend the LC to clearly allow partial payments / partial drawings against partial shipments/documents. Partial drawings must not be restricted.';
+      return `Please amend the LC to clearly allow partial payments / partial drawings against partial shipments/documents${targetPhrase}. Partial drawings must not be restricted.`;
     },
     messageTemplate: (details) => {
+      const clauseRef = getClauseRef(details, 'partial_payment_not_allowed');
+      const targetPhrase = clauseRef ? ` (${clauseRef})` : '';
       if (details.additionalNote?.trim()) {
-        return `Allow partial payment/drawing: ${details.additionalNote.trim()}.`;
+        return `Allow partial payment/drawing${targetPhrase}: ${details.additionalNote.trim()}.`;
       }
-      return 'Amend LC to allow partial payment / partial drawing.';
+      return `Amend LC to allow partial payment / partial drawing${targetPhrase}.`;
     }
   },
   {

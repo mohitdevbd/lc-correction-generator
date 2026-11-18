@@ -83,6 +83,7 @@ export interface AdditionalDetails {
   correctBeneficiaryName?: string;
   orderQuantity?: string;
   unitPrice?: string;
+  clauseLocations?: Record<string, string>;
 }
 
 export type SalutationType =

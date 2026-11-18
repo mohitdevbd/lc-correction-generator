@@ -44,7 +44,7 @@ export const DynamicFields: React.FC<DynamicFieldsProps> = ({
   );
   const showBank = selectedCorrectionIds.includes('official_bank_confirmation');
   const showClause = selectedCorrectionIds.some((id) =>
-    ['physical_verification_clause', 'bank_verification_report_deletion', 'acceptance_after_receipt_deletion'].includes(id)
+    ['physical_verification_clause', 'applicant_certificate', 'bank_verification_report_deletion', 'acceptance_after_receipt_deletion'].includes(id)
   );
   const showCustom = selectedCorrectionIds.includes('other_correction');
 

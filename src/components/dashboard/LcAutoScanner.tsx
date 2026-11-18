@@ -162,13 +162,24 @@ export const LcAutoScanner: React.FC<LcAutoScannerProps> = ({
   const handleApply = () => {
     if (!auditResult) return;
 
-    // Combine suggested details from all selected issues
+    // Combine suggested details from all selected issues and map clause locations
     const combinedDetails: Partial<AdditionalDetails> = {};
+    const clauseLocations: Record<string, string> = {};
+
     auditResult.issues.forEach((issue) => {
-      if (selectedIssueIds.includes(issue.id) && issue.suggestedDetails) {
-        Object.assign(combinedDetails, issue.suggestedDetails);
+      if (selectedIssueIds.includes(issue.id)) {
+        if (issue.clauseLocation && issue.correctionId) {
+          clauseLocations[issue.correctionId] = issue.clauseLocation;
+        }
+        if (issue.suggestedDetails) {
+          Object.assign(combinedDetails, issue.suggestedDetails);
+        }
       }
     });
+
+    if (Object.keys(clauseLocations).length > 0) {
+      combinedDetails.clauseLocations = clauseLocations;
+    }
 
     onApplyAudit(auditResult, selectedIssueIds, combinedDetails);
     setIsOpen(false);

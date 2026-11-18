@@ -365,10 +365,16 @@ function extractClauseNumber(snippet?: string, parentText?: string): string | nu
 
   // Fallback: look back in parentText to find enclosing numbered clause
   if (parentText) {
-    const idx = parentText.indexOf(trimmed.substring(0, Math.min(30, trimmed.length)));
+    let idx = parentText.indexOf(trimmed.substring(0, Math.min(35, trimmed.length)));
+    if (idx === -1) {
+      const firstWords = trimmed.split(/\s+/).slice(0, 4).join(' ');
+      if (firstWords.length >= 8) {
+        idx = parentText.search(new RegExp(firstWords.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/\s+/g, '\\s+'), 'i'));
+      }
+    }
     if (idx !== -1) {
-      const lookBack = parentText.substring(Math.max(0, idx - 250), idx + 5);
-      const numMatches = [...lookBack.matchAll(/(?:^|\n|\.\s+)\s*([0-9]{1,2})[\.\)](?!\d)\s*[A-Z]/gi)];
+      const lookBack = parentText.substring(Math.max(0, idx - 800), idx + 5);
+      const numMatches = [...lookBack.matchAll(/(?:^|\n|\.\s+)\s*(?:CLAUSE\s+)?([0-9]{1,2})[\.\)](?!\d)\s*[A-Z]/gi)];
       if (numMatches.length > 0) {
         const lastNum = numMatches[numMatches.length - 1][1];
         return `Clause ${lastNum.padStart(2, '0')}`;
@@ -377,6 +383,28 @@ function extractClauseNumber(snippet?: string, parentText?: string): string | nu
   }
 
   return null;
+}
+
+function findEnclosingClause(keywordRegex: RegExp, fullText: string): { clauseNum: string | null; fullClause: string } {
+  const match = fullText.match(keywordRegex);
+  if (!match || match.index === undefined) return { clauseNum: null, fullClause: '' };
+
+  const matchIdx = match.index;
+  const lookBack = fullText.substring(Math.max(0, matchIdx - 600), matchIdx);
+  const clauseStarts = [...lookBack.matchAll(/(?:^|\n|\.\s+)\s*(?:CLAUSE\s+)?([0-9]{1,2}|[A-Z])[\.\)](?!\d)\s*/gi)];
+
+  if (clauseStarts.length > 0) {
+    const lastClause = clauseStarts[clauseStarts.length - 1];
+    const num = lastClause[1].padStart(2, '0');
+    const actualStart = Math.max(0, matchIdx - 600) + lastClause.index! + lastClause[0].indexOf(lastClause[1]);
+    const afterStart = fullText.substring(actualStart);
+    const endMatch = afterStart.match(/(?:\n\s*(?:CLAUSE\s+)?[0-9]{1,2}[\.\)](?!\d)|\n\s*(?::?|F)?[0-9]{2}[A-Z]?\s*:)/i);
+    const fullClause = endMatch ? afterStart.substring(0, endMatch.index).trim() : afterStart.substring(0, 500).trim();
+
+    return { clauseNum: `Clause ${num}`, fullClause };
+  }
+
+  return { clauseNum: null, fullClause: match[0] };
 }
 
 function resolveClauseLocation(defaultField: string, snippet?: string, parentText?: string): string {
@@ -590,21 +618,49 @@ export function auditLcText(text: string, settings?: UserSettings): LcAuditResul
   const clausePrefix = '(?:(?:\\([A-Z0-9]{1,2}\\)|[0-9]{1,2}[\\.\\)](?!\\d)|(?!(?:I|V|X)[\\.\\)])\\b[A-Z][\\.\\)])\\s*)?';
   const sameConditionChar = '(?:(?!(?:\\n|\\.|;)\\s*(?:[0-9]{1,2}[\\.\\)]|\\([A-Z0-9]{1,2}\\))|\\n\\s*(?::|F)[0-9]{2})[\\s\\S])';
 
-  const discRegex = new RegExp(
+  const discRegexGlobal = new RegExp(
     `(?:` +
       `${clausePrefix}\\s*(?:(?:A\\s+)?(?:IN\\s+CASE\\s+OF\\s+)?DISCREPA[A-Z]*\\s*(?:FEE|CHARGE|COMMISSION|COST|DOCUMENTS?)?)[\\s\\S]*?${conditionBoundary}` +
       `|${clausePrefix}\\s*(?:A\\s+)?(?:FEE|CHARGE|COST|COMMISSION|EXPENSE|AN?\\s+AMOUNT)\\s+(?:OF\\s+)?(?:USD|EUR|GBP)?\\s*\\d+${sameConditionChar}{0,120}?DISCREPA[A-Z]*[\\s\\S]*?${conditionBoundary}` +
       `|${clausePrefix}\\s*(?:(?:WE\\s+)?(?:WILL|SHALL)\\s+(?:BE\\s+)?DEDUCT(?:ED)?)${sameConditionChar}{0,120}?DISCREPA[A-Z]*[\\s\\S]*?${conditionBoundary}` +
     `)`,
-    'i'
+    'gi'
   );
-  const discMatch = textWithout71D.match(discRegex);
+  const discMatches = [...textWithout71D.matchAll(discRegexGlobal)];
   let cleanDiscSnippet = '';
 
-  if (discMatch) {
+  if (discMatches.length > 0) {
     hasDiscrepancyMention = true;
-    cleanDiscSnippet = discMatch[0].trim();
-    discSnippet = cleanDiscSnippet.replace(/\s+/g, ' ');
+    for (const m of discMatches) {
+      const snip = m[0].trim();
+      const tieredDisc = parseTieredFee(snip, numericLcAmount);
+      let fee = 0;
+      if (tieredDisc) {
+        fee = tieredDisc.applicableFee;
+      } else {
+        const specificDiscAmtMatch =
+          snip.match(/DISCREPA[A-Z]*\s*(?:FEE|CHARGE|COST|COMMISSION|DOCUMENTS?)?S?\s*(?:OF|AT|FOR)?\s*(?:USD|EUR|GBP)?[\s\.]*(\d{1,3}(?:\.\d{2})?)/i) ||
+          snip.match(/(?:USD|EUR|GBP)[\s\.]*(\d{1,3}(?:\.\d{2})?)\s*(?:AS\s+)?(?:A\s+)?(?:DISCREPA|DISC)/i);
+        if (specificDiscAmtMatch) {
+          fee = parseFloat(specificDiscAmtMatch[1]);
+        } else {
+          const feeMatches = [
+            ...snip.matchAll(/(?:(?:USD|EUR|GBP)\s*(\d{2,3}(?:\.\d{2})?)|(?:AT|OF|COST|FEE|CHARGE)\s+(?:USD|EUR|GBP)?\s*(\d{2,3}(?:\.\d{2})?))\b(?!\s*,\s*000|\s*000)/gi)
+          ];
+          const candidateFees = feeMatches.map(f => parseFloat(f[1] || f[2])).filter(f => f >= 10 && f <= 350);
+          if (candidateFees.length > 0) fee = Math.max(...candidateFees);
+        }
+      }
+
+      if (fee > 0 && (discAmt === 0 || fee >= discAmt)) {
+        discAmt = fee;
+        cleanDiscSnippet = snip;
+        discSnippet = cleanDiscSnippet.replace(/\s+/g, ' ');
+      } else if (!cleanDiscSnippet) {
+        cleanDiscSnippet = snip;
+        discSnippet = cleanDiscSnippet.replace(/\s+/g, ' ');
+      }
+    }
   } else {
     const discIndex = textWithout71D.search(/DISCREPA/i);
     if (discIndex !== -1) {
@@ -617,21 +673,28 @@ export function auditLcText(text: string, settings?: UserSettings): LcAuditResul
       const tagStop = clauseSnippet.search(new RegExp(conditionBoundary, 'i'));
       cleanDiscSnippet = tagStop !== -1 ? clauseSnippet.substring(0, tagStop) : clauseSnippet;
       discSnippet = cleanDiscSnippet.replace(/\s+/g, ' ');
+
+      const tieredDisc = parseTieredFee(cleanDiscSnippet, numericLcAmount);
+      if (tieredDisc) {
+        discAmt = tieredDisc.applicableFee;
+      } else {
+        const specificDiscAmtMatch =
+          cleanDiscSnippet.match(/DISCREPA[A-Z]*\s*(?:FEE|CHARGE|COST|COMMISSION|DOCUMENTS?)?S?\s*(?:OF|AT|FOR)?\s*(?:USD|EUR|GBP)?[\s\.]*(\d{1,3}(?:\.\d{2})?)/i) ||
+          cleanDiscSnippet.match(/(?:USD|EUR|GBP)[\s\.]*(\d{1,3}(?:\.\d{2})?)\s*(?:AS\s+)?(?:A\s+)?(?:DISCREPA|DISC)/i);
+        if (specificDiscAmtMatch) {
+          discAmt = parseFloat(specificDiscAmtMatch[1]);
+        } else {
+          const feeMatches = [
+            ...cleanDiscSnippet.matchAll(/(?:(?:USD|EUR|GBP)\s*(\d{2,3}(?:\.\d{2})?)|(?:AT|OF|COST|FEE|CHARGE)\s+(?:USD|EUR|GBP)?\s*(\d{2,3}(?:\.\d{2})?))\b(?!\s*,\s*000|\s*000)/gi)
+          ];
+          const candidateFees = feeMatches.map(f => parseFloat(f[1] || f[2])).filter(f => f >= 10 && f <= 350);
+          if (candidateFees.length > 0) discAmt = Math.max(...candidateFees);
+        }
+      }
     }
   }
 
-  if (hasDiscrepancyMention) {
-    const tieredDisc = parseTieredFee(cleanDiscSnippet, numericLcAmount);
-    if (tieredDisc) {
-      discAmt = tieredDisc.applicableFee;
-    } else {
-      // Require explicit currency or fee indicator (never bare numbers or SWIFT tags like :78:)
-      const feeMatches = [
-        ...cleanDiscSnippet.matchAll(/(?:(?:USD|EUR|GBP)\s*(\d{2,3}(?:\.\d{2})?)|(?:AT|OF|COST|FEE|CHARGE)\s+(?:USD|EUR|GBP)?\s*(\d{2,3}(?:\.\d{2})?))\b(?!\s*,\s*000|\s*000)/gi)
-      ];
-      const candidateFees = feeMatches.map(m => parseFloat(m[1] || m[2])).filter(f => f >= 10 && f <= 350);
-      if (candidateFees.length > 0) discAmt = Math.max(...candidateFees);
-    }
+  if (hasDiscrepancyMention && cleanDiscSnippet) {
 
     const upperDiscSnippet = cleanDiscSnippet.toUpperCase().replace(/\s+/g, ' ');
     isDiscOnApplicant =
@@ -761,8 +824,15 @@ export function auditLcText(text: string, settings?: UserSettings): LcAuditResul
           feeVal = parseFloat(docSettleMatch[1]);
           feeType = 'Document Settlement Charge';
         } else {
-          const amtM = snippet.match(/(?:(?:USD|EUR|GBP)[\s\.]*(\d{1,3}(?:\.\d{2})?)|(?:CHARGE|FEE|COMMISSION|COST|DEDUCT(?:ED)?|OF|AT|FOR)\s+(?:USD|EUR|GBP)?[\s\.]*(\d{1,3}(?:\.\d{2})?)|(\d{1,3}(?:\.\d{2})?)\s*(?:USD|EUR|GBP))\b/i);
-          if (amtM) feeVal = parseFloat(amtM[1] || amtM[2] || amtM[3]);
+          const specificPayAmtMatch =
+            snippet.match(/(?:PAYMENT|SETTLEMENT|REIMBURSE?MENT|DOCUMENT\s*SETTLEMENT|FUND\s*TRANSFER|RTGS)\s*(?:CHARGE|COMMISSION|FEE|COST|EXPENSE)?S?\s*(?:OF|AT|FOR)?\s*(?:USD|EUR|GBP)?[\s\.]*(\d{1,3}(?:\.\d{2})?)/i) ||
+            snippet.match(/(?:USD|EUR|GBP)[\s\.]*(\d{1,3}(?:\.\d{2})?)\s*(?:AS\s+)?(?:PAYMENT|SETTLEMENT|REIMBURSE?MENT)/i);
+          if (specificPayAmtMatch) {
+            feeVal = parseFloat(specificPayAmtMatch[1]);
+          } else {
+            const amtM = snippet.match(/(?:(?:USD|EUR|GBP)[\s\.]*(\d{1,3}(?:\.\d{2})?)|(?:CHARGE|FEE|COMMISSION|COST|DEDUCT(?:ED)?|OF|AT|FOR)\s+(?:USD|EUR|GBP)?[\s\.]*(\d{1,3}(?:\.\d{2})?)|(\d{1,3}(?:\.\d{2})?)\s*(?:USD|EUR|GBP))\b/i);
+            if (amtM) feeVal = parseFloat(amtM[1] || amtM[2] || amtM[3]);
+          }
         }
       }
 
@@ -859,7 +929,7 @@ export function auditLcText(text: string, settings?: UserSettings): LcAuditResul
             : (payClauseNum ? `Field 47A, ${payClauseNum}` : 'Field 47A')))
     : 'Field 47A (Missing)';
 
-  const relevantClauses = [discClauseNum, expClauseNum, payClauseNum].filter(Boolean) as string[];
+  const relevantClauses = Array.from(new Set([discClauseNum, expClauseNum, payClauseNum].filter(Boolean))) as string[];
   let combinedLoc = 'Field 47A';
   if (relevantClauses.length > 1) {
     const formatted = relevantClauses.map((c, i) => i === 0 ? c : c.replace(/^Clause\s*/i, ''));
@@ -976,8 +1046,8 @@ export function auditLcText(text: string, settings?: UserSettings): LcAuditResul
     const payNeedsRevision = payOnBeneficiary > 25;
     const combinedNeedsRevision = totalBeneficiaryCharges > 50 || (hasExpiredLcMention && !isExpiredLcOnApplicant);
 
-    // If both need revision OR combined total exceeds $50.00 OR extra expired LC fee present
-    if ((discNeedsRevision && payNeedsRevision) || (combinedNeedsRevision && (discOnBeneficiary > 0 && payOnBeneficiary > 0))) {
+    // If either charge needs revision OR combined total exceeds $50.00 OR extra expired LC fee present
+    if (discNeedsRevision || payNeedsRevision || combinedNeedsRevision) {
       issues.push({
         id: 'issue_combined_charges_revision',
         correctionId: 'discrepancy_payment_charges_revision',
@@ -990,8 +1060,8 @@ export function auditLcText(text: string, settings?: UserSettings): LcAuditResul
         detectedText: breakdownFull,
         chargeBreakdown,
         suggestedDetails: {
-          discrepancyChargeInLc: discAmt.toFixed(2),
-          paymentChargeInLc: totalPaymentFeeBeneficiary.toFixed(2),
+          discrepancyChargeInLc: discAmt > 0 ? discAmt.toFixed(2) : (hasDiscrepancyMention ? 'Unspecified' : undefined),
+          paymentChargeInLc: totalPaymentFeeBeneficiary > 0 ? totalPaymentFeeBeneficiary.toFixed(2) : (hasAnyPaymentFeeMention ? 'Unspecified' : undefined),
           acceptableDiscrepancyCharge: '25.00',
           acceptablePaymentCharge: '25.00',
           additionalNote: hasExpiredLcMention && !isExpiredLcOnApplicant ? `Delete extra Expired L/C fee of USD ${expiredLcAmt.toFixed(2)}` : undefined
@@ -1119,7 +1189,7 @@ export function auditLcText(text: string, settings?: UserSettings): LcAuditResul
   // ==========================================
   const hasPhysicalVerificationMention =
     /PHYSICAL\s*VERIFICATION/i.test(normalizedText) ||
-    /VERIFICATION\s+OF\s+GOODS/i.test(normalizedText) ||
+    /VERIFICATION\s+OF\s+(?:THE\s+SUPPLIED\s+)?GOODS/i.test(normalizedText) ||
     /PHYSICAL\s*RECEIPT/i.test(normalizedText) ||
     /RECEIPT\s+OF\s+GOODS/i.test(normalizedText) ||
     /GOODS\s+ARE\s+FOUND\s+(?:DAMAGED|DEFECTIVE)/i.test(normalizedText) ||
@@ -1127,13 +1197,10 @@ export function auditLcText(text: string, settings?: UserSettings): LcAuditResul
     (/CUSTOMS\s+CLEARANCE/i.test(normalizedText) && /ACCEPTANCE/i.test(normalizedText));
 
   if (hasPhysicalVerificationMention) {
-    const isPhysicalVerif = /PHYSICAL\s*VERIFICATION|VERIFICATION\s+OF\s+GOODS/i.test(normalizedText);
-    const pvClauseMatch = normalizedText.match(/(?:(?:\n|\.|;|^)\s*(?:CLAUSE\s+)?([0-9]{1,2}|[A-Z])[\.\)]\s*)([^\n\.;]*?(?:PHYSICAL\s*VERIFICATION|VERIFICATION\s+OF\s+GOODS|PHYSICAL\s*RECEIPT|RECEIPT\s+OF\s+GOODS|GOODS\s+ARE\s+FOUND\s+(?:DAMAGED|DEFECTIVE)|DEBIT\s+NOTE\s+ISSUED\s+BY\s+(?:THE\s+)?BUYER)[^\n\.;]*)/i);
-    const detectedClauseNumber = pvClauseMatch && pvClauseMatch[1] ? `Clause ${pvClauseMatch[1].trim()}` : '';
-
-    const snippet = pvClauseMatch
-      ? pvClauseMatch[0].trim().replace(/\s+/g, ' ')
-      : extractSnippet(normalizedText, /(?:ACCEPTANCE[\s\S]{0,60}?PHYSICAL\s*VERIFICATION[\s\S]{0,60}?(?:\.|$)|PHYSICAL\s*VERIFICATION[\s\S]{0,60}?(?:\.|$)|ACCEPTANCE\s+WILL\s+BE\s+GIVEN\s+AFTER[\s\S]{0,60}?(?:\.|$)|PHYSICAL\s*RECEIPT[\s\S]{0,60}?(?:\.|$)|RECEIPT\s*OF\s*GOODS[\s\S]{0,60}?(?:\.|$)|GOODS\s+ARE\s+FOUND\s+DAMAGED[^\n.]{0,100})/i);
+    const isPhysicalVerif = /PHYSICAL\s*VERIFICATION|VERIFICATION\s+OF\s+(?:THE\s+SUPPLIED\s+)?GOODS/i.test(normalizedText);
+    const pv = findEnclosingClause(/(?:PHYSICAL\s*VERIFICATION|VERIFICATION\s+OF\s+(?:THE\s+SUPPLIED\s+)?GOODS|PHYSICAL\s*RECEIPT|RECEIPT\s+OF\s+GOODS|GOODS\s+ARE\s+FOUND\s+(?:DAMAGED|DEFECTIVE)|DEBIT\s+NOTE\s+ISSUED\s+BY\s+(?:THE\s+)?BUYER)/i, normalizedText);
+    const detectedClauseNumber = pv.clauseNum || '';
+    const snippet = pv.fullClause ? pv.fullClause.replace(/\s+/g, ' ') : extractSnippet(normalizedText, /(?:ACCEPTANCE[\s\S]{0,60}?PHYSICAL\s*VERIFICATION[\s\S]{0,60}?(?:\.|$)|PHYSICAL\s*VERIFICATION[\s\S]{0,60}?(?:\.|$)|ACCEPTANCE\s+WILL\s+BE\s+GIVEN\s+AFTER[\s\S]{0,60}?(?:\.|$)|PHYSICAL\s*RECEIPT[\s\S]{0,60}?(?:\.|$)|RECEIPT\s*OF\s*GOODS[\s\S]{0,60}?(?:\.|$)|GOODS\s+ARE\s+FOUND\s+DAMAGED[^\n.]{0,100})/i);
 
     const isQualityOrDamageClaim = /DAMAGED|DEFECTIVE|DEBIT\s+NOTE/i.test(snippet || '');
 
@@ -1168,19 +1235,28 @@ export function auditLcText(text: string, settings?: UserSettings): LcAuditResul
   // ==========================================
   if (
     upper.includes('BANK VERIFICATION REPORT') ||
-    upper.includes('VERIFICATION REPORT') && upper.includes('BANK') ||
-    upper.includes('AUTHENTICATED REPORT')
+    ((upper.includes('VERIFICATION REPORT') || upper.includes('AUTHENTICATED REPORT')) && upper.includes('BANK'))
   ) {
-    const snippet = extractSnippet(normalizedText, /VERIFICATION REPORT[^\n.]{0,100}/i);
-    issues.push({
-      id: 'issue_bank_verification_report',
-      correctionId: 'bank_verification_report_deletion',
-      title: 'Bank Verification Report Clause – Delete',
-      clauseLocation: resolveClauseLocation('Field 47A', snippet),
-      severity: 'warning',
-      reason: 'Clauses mandating an inspection or verification report signed by applicant bank officials introduce serious document negotiation delays.',
-      detectedText: snippet
-    });
+    const snippet = extractSnippet(normalizedText, /(?:BANK\s+OFFICIAL[^\n.]{0,50}?)?VERIFICATION REPORT[^\n.]{0,100}/i);
+    const bankVerifLoc = resolveClauseLocation('Field 47A', snippet, normalizedText);
+
+    // Suppress duplicate flag if this clause is already covered under Physical Verification (Rule 3)
+    const alreadyHandledInPv = issues.some(
+      iss => iss.id === 'issue_physical_verification_clause' &&
+             (iss.clauseLocation === bankVerifLoc || (iss.detectedText && snippet && iss.detectedText.includes(snippet.substring(0, 20))))
+    );
+
+    if (!alreadyHandledInPv) {
+      issues.push({
+        id: 'issue_bank_verification_report',
+        correctionId: 'bank_verification_report_deletion',
+        title: 'Bank Verification Report Clause – Delete',
+        clauseLocation: bankVerifLoc,
+        severity: 'warning',
+        reason: 'Clauses mandating an inspection or verification report signed by applicant bank officials introduce serious document negotiation delays.',
+        detectedText: snippet
+      });
+    }
   }
 
   // ==========================================
@@ -1200,19 +1276,46 @@ export function auditLcText(text: string, settings?: UserSettings): LcAuditResul
     upperFlat.includes("BUYER CERTIFICATE") ||
     upperFlat.includes("SIGNATURE MUST BE MATCHED") ||
     (upperFlat.includes("RECEIVED IN GOOD") && (upperFlat.includes("AUTHORISED REPRESENTATIVE") || upperFlat.includes("AUTHORIZED REPRESENTATIVE") || upperFlat.includes("AUTHORIZED SIGNATORY"))) ||
-    /(?:COUNTER-?SIGNED|SIGNED)\s+BY\s+(?:THE\s+)?(?:APPLICANT|BUYER|MANAGING\s+DIRECTOR|CHAIRMAN)/i.test(normalizedText)
+    /(?:COUNTER-?SIGNED|SIGNED)\s+BY\s+(?:THE\s+)?(?:APPLICANT|BUYER|MANAGING\s+DIRECTOR|CHAIRMAN)/i.test(normalizedText) ||
+    /\bIC\s+ISSUED\s+BY\b/i.test(normalizedText)
   ) {
-    const snippet = extractSnippet(normalizedText, /(?:APPLICANT|BUYER)(?:'S|S)?\s+(?:INSPECTION\s+)?CERTIFICATE[^\n.]{0,100}/i) ||
-                    extractSnippet(normalizedText, /(?:COUNTER-?SIGNED|SIGNED)\s+BY\s+(?:THE\s+)?(?:APPLICANT|BUYER|MANAGING\s+DIRECTOR|CHAIRMAN)[^\n.]{0,100}/i) ||
-                    extractSnippet(normalizedText, /(?:RECEIVED\s+IN\s+GOOD|SIGNATURE\s+MUST\s+BE\s+MATCHED)[^\n.]{0,120}/i);
+    const icSnippets: string[] = [];
+    const icClauseRefs: string[] = [];
+
+    const icMatch = normalizedText.match(/(?:(?:\n|^)\s*(?:CLAUSE\s+)?([0-9]{1,2})[\.\)]\s*)?([^\n\.;]*?\bIC\s+ISSUED\s+BY[^\n\.;]*)/i);
+    if (icMatch) {
+      if (icMatch[1]) icClauseRefs.push(`Clause ${icMatch[1].padStart(2, '0')}`);
+      icSnippets.push(icMatch[0].trim().replace(/\s+/g, ' '));
+    }
+
+    const signMatch = normalizedText.match(/(?:(?:\n|^)\s*(?:CLAUSE\s+)?([0-9]{1,2})[\.\)]\s*)?([^\n\.;]*?(?:SIGNED[\s\S]{0,30}?BY\s+(?:THE\s+)?(?:APPLICANT|BUYER|MANAGING\s+DIRECTOR|CHAIRMAN)|APPLICANT(?:'S)?\s+INSPECTION\s+CERTIFICATE)[^\n\.;]*)/i);
+    if (signMatch) {
+      if (signMatch[1]) {
+        const cRef = `Clause ${signMatch[1].padStart(2, '0')}`;
+        if (!icClauseRefs.includes(cRef)) icClauseRefs.push(cRef);
+      }
+      if (!icSnippets.includes(signMatch[0].trim().replace(/\s+/g, ' '))) {
+        icSnippets.push(signMatch[0].trim().replace(/\s+/g, ' '));
+      }
+    }
+
+    let resolvedLocation = 'Field 46A';
+    if (icClauseRefs.length > 1) {
+      resolvedLocation = `Field 46A (${icClauseRefs.join(' & ')})`;
+    } else if (icClauseRefs.length === 1) {
+      resolvedLocation = `Field 46A, ${icClauseRefs[0]}`;
+    }
+
+    const fullSnippet = icSnippets.join('; ') || extractSnippet(normalizedText, /(?:APPLICANT|BUYER)(?:'S|S)?\s+(?:INSPECTION\s+)?CERTIFICATE[^\n.]{0,100}/i);
+
     issues.push({
       id: 'issue_applicant_certificate',
-      correctionId: 'physical_verification_clause',
+      correctionId: 'applicant_certificate',
       title: 'Applicant Certificate / Inspection Removal',
-      clauseLocation: resolveClauseLocation('Field 46A/47A', snippet, normalizedText),
+      clauseLocation: resolvedLocation,
       severity: 'critical',
-      reason: 'Requiring an inspection or delivery certificate signed/counter-signed by the buyer/applicant allows the buyer to withhold approval and block payment at will.',
-      detectedText: snippet
+      reason: 'Requiring an inspection certificate (IC) or delivery challan signed/counter-signed by the buyer/applicant allows the buyer to withhold approval and block payment at will.',
+      detectedText: fullSnippet
     });
   }
 
@@ -1607,21 +1710,19 @@ function parseFlexibleDate(dateStr: string): Date | null {
 }
 
 function extractAmount(text: string): { currency?: string; amount?: string } {
-  // Case 1: Look directly around :32B: or F32B: or 32B:
-  // SWIFT MT700 field 32B format: :32B:YYMMDD[CUR][AMOUNT] or :32B: Currency Code, Amount\nUSD20935,
-  // or F32B: Currency: USD Amount: 11125,00 #11125,00#
-  const tag32bMatch = text.match(/(?:(?:\b|\n)\s*(?::?|F)?32B\b[^\n:]*[:#]?)[^\n]*\n?([\s\S]{1,150}?(?=(?:\n\s*(?::?|F)?[0-9]{2}[A-Z]?\s*:|\n\s*--- PAGE BREAK ---\s*\n|$)))/i);
+  // Case 1: Look directly around :32B: or F32B: or 32B: or £328 (OCR variant) or Currency Code, Amount
+  const tag32bMatch = text.match(/(?:(?:\b|\n)\s*(?::?|[F£])?32[B8]\b[^\n:]*[:#]?|\bCurrency\s*Code,\s*Amount\b)[^\n]*\n?([\s\S]{1,200}?(?=(?:\n\s*(?::?|[F£])?[0-9]{2}[A-Z0-9]?\s*:|\n\s*--- PAGE BREAK ---\s*\n|$)))/i);
   if (tag32bMatch) {
     const block = tag32bMatch[1];
     
-    // Check if currency code exists in block (including directly attached to amount e.g. USD50,512.500)
-    const currMatch = block.match(/(?:^|\b)(USD|EUR|GBP|BDT|JPY|CNY|CHF)(?=\s|\d|[.,]|$)/i);
+    // Check if currency code exists in block (including directly attached to amount e.g. USD50,512.500 or OCR typo USO)
+    const currMatch = block.match(/(?:^|\b)(USD|EUR|GBP|BDT|JPY|CNY|CHF|USO|US\s*DOLLAR)(?=\s|\d|[.,]|$)/i);
     if (currMatch) {
-      const currency = currMatch[1].toUpperCase();
+      const currency = currMatch[1].toUpperCase().includes('US') ? 'USD' : currMatch[1].toUpperCase();
       // Extract amount following the currency or Amount: keyword
       const afterCurrency = block.substring(currMatch.index! + currMatch[0].length);
       const amtMatch = afterCurrency.match(/\s*(?:Amount:\s*)?#?([0-9]{1,3}(?:[.,][0-9]{3})*(?:[.,][0-9]{2,3})|[0-9]+(?:[.,][0-9]{2,3})|[0-9]+)/i) ||
-                       block.match(/Amount:\s*#?([0-9]{1,3}(?:[.,][0-9]{3})*(?:[.,][0-9]{2,3})|[0-9]+(?:[.,][0-9]{2,3})|[0-9]+)/i);
+                       block.match(/Amount[:\s]+#?([0-9]{1,3}(?:[.,][0-9]{3})*(?:[.,][0-9]{2,3})|[0-9]+(?:[.,][0-9]{2,3})|[0-9]+)/i);
       if (amtMatch) {
         let rawAmt = amtMatch[1].trim();
         // Check if comma is used as decimal separator (e.g. 11125,00 or 11.125,00)
