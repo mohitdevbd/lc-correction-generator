@@ -397,7 +397,11 @@ export function auditLcText(text: string, settings?: UserSettings): LcAuditResul
     ? rawPages.filter((p, idx) => {
         if (idx === 0) return true;
         const up = p.toUpperCase();
-        const isPiPage = /\bPROFORMA\s+INVOICE\b/.test(up) && !/(?::46A:|:47A:|:71D:|:78:|F46A:|F47A:|F71D:|F78:)/.test(up);
+        // Any page containing SWIFT LC field tags or standard LC headers cannot be a separate PI attachment
+        const hasLcTags = /(?:(?:\b|\n)\s*(?::?|F)?(?:20|23|27|31C|31D|32B|39A|39C|40A|40E|41[A-Z]?|42[A-Z]?|43[A-Z]?|44[A-Z]?|45[A-Z]?|46[A-Z]?|47[A-Z]?|48|49[A-Z]?|50|51[A-Z]?|53[A-Z]?|57[A-Z]?|58[A-Z]?|59|71[A-Z]?|72[A-Z]?|78)\s*:)/i.test(up) ||
+                          /(?:DOCUMENTARY CREDIT|IRREVOCABLE DOCUMENTARY|FIN MT 700|ADDITIONAL CONDITIONS|DOCUMENTS REQUIRED)/i.test(up);
+        const isPiTitle = /^\s*PROFORMA\s+INVOICE\b/m.test(up) || (/\bPROFORMA\s+INVOICE\b/.test(up) && !/\bAS\s+PER\s+PROFORMA\s+INVOICE\b/.test(up) && !/\bPER\s+PROFORMA\s+INVOICE\b/.test(up));
+        const isPiPage = isPiTitle && !hasLcTags;
         return !isPiPage;
       })
     : rawPages;
@@ -410,19 +414,19 @@ export function auditLcText(text: string, settings?: UserSettings): LcAuditResul
   // Issue date (Tag 31C or F31C)
   const detectedIssueDate = extractDate(
     normalizedText,
-    /(?::31C:|F31C:[^\n]*Date[^\n]*Issue|ISSUE\s*DATE|DATE\s*OF\s*ISSUE)[^\n:]*[:#]?\s*([0-9A-Za-z\/\-\. ]{6,40})/i
+    /(?:(?:\b|\n)\s*(?::?|F)?31C\b[^\n:]*[:#]?|ISSUE\s*DATE|DATE\s*OF\s*ISSUE)[^\n:]*[:#]?\s*([0-9A-Za-z\/\-\. ]{6,40})/i
   );
 
   // Expiry date (Tag 31D or F31D)
   const detectedExpiryDate = extractDate(
     normalizedText,
-    /(?::31D:|F31D:[^\n]*Date[^\n]*Expiry|EXPIRY\s*DATE|DATE\s*OF\s*EXPIRY)[^\n:]*[:#]?\s*(?:Place:[^\n]*\n)?(?:Date:)?\s*([0-9A-Za-z\/\-\. ]{6,40})/i
+    /(?:(?:\b|\n)\s*(?::?|F)?31D\b[^\n:]*[:#]?|EXPIRY\s*DATE|DATE\s*OF\s*EXPIRY)[^\n:]*[:#]?\s*(?:Place:[^\n]*\n)?(?:Date:)?\s*([0-9A-Za-z\/\-\. ]{6,40})/i
   );
 
   // Latest Shipment date (Tag 44C or F44C)
   const detectedShipmentDate = extractDate(
     normalizedText,
-    /(?::44C:|F44C:[^\n]*Latest\s*Date\s*of\s*Shipment|F44C:[^\n]*Shipment|LATEST\s*DATE\s*OF\s*SHIPMENT|LATEST\s*SHIPMENT|SHIPMENT\s*DATE)[^\n:]*[:#]?\s*([0-9A-Za-z\/\-\. ]{6,40})/i
+    /(?:(?:\b|\n)\s*(?::?|F)?44C\b[^\n:]*[:#]?|LATEST\s*DATE\s*OF\s*SHIPMENT|LATEST\s*SHIPMENT|SHIPMENT\s*DATE)[^\n:]*[:#]?\s*([0-9A-Za-z\/\-\. ]{6,40})/i
   );
   
   // Extract currency and amount
@@ -431,11 +435,11 @@ export function auditLcText(text: string, settings?: UserSettings): LcAuditResul
   // Extract Beneficiary and Applicant (bounded before next SWIFT field tag)
   const detectedBeneficiary = extractParty(
     normalizedText,
-    /(?::59[A-Z]?:|F59[A-Z]?:[^\n]*Beneficiary|\bBENEFICIARY\s*(?:NAME\s*(?:AND\s*ADDRESS)?)?\s*:)[^\n:]*[:#]?\s*\n?([\s\S]{1,500}?)(?=(?:\n\s*:[0-9]{2}|\n\s*F[0-9]{2}|$))/i
+    /(?:(?:\b|\n)\s*(?::?|F)?59[A-Z]?\b[^\n:]*[:#]?|\bBENEFICIARY\s*(?:NAME\s*(?:AND\s*ADDRESS)?)?\s*:)\s*\n?([\s\S]{1,500}?)(?=(?:\n\s*(?::?|F)?[0-9]{2}[A-Z]?\s*:|\n\s*--- PAGE BREAK ---\s*\n|$))/i
   );
   const detectedApplicant = extractParty(
     normalizedText,
-    /(?::50[A-Z]?:|F50[A-Z]?:[^\n]*Applicant|\bAPPLICANT\s*(?:NAME\s*(?:AND\s*ADDRESS)?)?\s*:)[^\n:]*[:#]?\s*\n?([\s\S]{1,500}?)(?=(?:\n\s*:[0-9]{2}|\n\s*F[0-9]{2}|$))/i
+    /(?:(?:\b|\n)\s*(?::?|F)?50[A-Z]?\b[^\n:]*[:#]?|\bAPPLICANT\s*(?:NAME\s*(?:AND\s*ADDRESS)?)?\s*:)\s*\n?([\s\S]{1,500}?)(?=(?:\n\s*(?::?|F)?[0-9]{2}[A-Z]?\s*:|\n\s*--- PAGE BREAK ---\s*\n|$))/i
   );
 
   const issues: LcAuditIssue[] = [];
@@ -452,8 +456,16 @@ export function auditLcText(text: string, settings?: UserSettings): LcAuditResul
   // 3. Flags IF AND ONLY IF:
   //    a) Issuing bank places charges inside their country / inside counter on Beneficiary.
   //    b) Unauthorized fees (e.g. Confirmation, Advising, Amendment, Courier) are placed on Beneficiary.
-  const chargesMatch = normalizedText.match(/(?::71D:|:71B:|(?:\b|\n|\s+)F71D:[^\n]*Charges|(?:\b|\n|\s+)F71D\s*:\s*(?:CHARGES)?|(?:\b|\n)\s*71D\s*:\s*(?:CHARGES)?)[ \t]*(?:Charges[ \t]*)?[:#]?\s*([\s\S]{1,400}?)(?=(?:\n:[0-9]{2}|\s+:[0-9]{2}:|(?:\n|\s+)F[0-9]{2}|\n\s*[0-9]{2}[A-Z]?\s*:|\s+[0-9]{2}[A-Z]?\s*:|$))/i);
-  const chargesBlock = chargesMatch ? chargesMatch[1].toUpperCase().replace(/\s+/g, ' ') : '';
+  const chargesMatch = normalizedText.match(/(?:(?:\b|\n)\s*(?::?|F)?71[DB]\b[ \t]*(?:Charges[ \t]*)?[:#]?)\s*\n?([\s\S]{1,500}?)(?=(?:\n\s*(?::?|F)?[0-9]{2}[A-Z]?\s*:|$))/i);
+  const chargesBlock = chargesMatch
+    ? chargesMatch[1]
+        .toUpperCase()
+        .replace(/-\s*\n\s*/g, '')
+        .replace(/\bBENEF\s+ICIARY\b/g, 'BENEFICIARY')
+        .replace(/\bREIMBURSEM\s+ENT\b/g, 'REIMBURSEMENT')
+        .replace(/\bB\s+ANK\b/g, 'BANK')
+        .replace(/\s+/g, ' ')
+    : '';
 
   if (chargesBlock) {
     const hasBeneficiaryCharge =
@@ -561,7 +573,7 @@ export function auditLcText(text: string, settings?: UserSettings): LcAuditResul
   // ==========================================
   // Exclude Field 71D so Tag 71D banking charges are audited completely separately from Tag 47A / conditions
   const textWithout71D = normalizedText.replace(
-    /(?::71D:|:71B:|(?:\b|\n|\s+)F71D:[^\n]*Charges|(?:\b|\n|\s+)F71D\s*:\s*(?:CHARGES)?|(?:\b|\n)\s*71D\s*:\s*(?:CHARGES)?)[ \t]*(?:Charges[ \t]*)?[:#]?[\s\S]*?(?=(?:\n:[0-9]{2}|\s+:[0-9]{2}:|(?:\n|\s+)F[0-9]{2}|\n\s*[0-9]{2}[A-Z]?\s*:|\s+[0-9]{2}[A-Z]?\s*:|$))/i,
+    /(?:(?:\b|\n)\s*(?::?|F)?71[DB]\b[ \t]*(?:Charges[ \t]*)?[:#]?)[\s\S]*?(?=(?:\n\s*(?::?|F)?[0-9]{2}[A-Z]?\s*:|$))/i,
     ''
   );
   const numericLcAmount = detectedAmount ? parseFloat(detectedAmount.replace(/,/g, '')) : 0;
@@ -719,10 +731,21 @@ export function auditLcText(text: string, settings?: UserSettings): LcAuditResul
 
       const isBorneByApplicant =
         (upperSnippet.includes("APPLICANT'S ACCOUNT") ||
+         upperSnippet.includes("APPLICANTS ACCOUNT") ||
+         upperSnippet.includes("APPLICANT ACCOUNT") ||
          upperSnippet.includes("FOR APPLICANT ACCOUNT") ||
          upperSnippet.includes("FOR ACCOUNT OF APPLICANT") ||
          upperSnippet.includes("BORNE BY APPLICANT") ||
-         upperSnippet.includes("BUYER'S ACCOUNT")) &&
+         upperSnippet.includes("BORNE BY THE APPLICANT") ||
+         upperSnippet.includes("BEAR BY APPLICANT") ||
+         upperSnippet.includes("BEAR BY THE APPLICANT") ||
+         upperSnippet.includes("BORNE BY BUYER") ||
+         upperSnippet.includes("BEAR BY BUYER") ||
+         upperSnippet.includes("FOR THE APPLICANT") ||
+         upperSnippet.includes("FOR APPLICANT") ||
+         upperSnippet.includes("BUYER'S ACCOUNT") ||
+         upperSnippet.includes("BUYERS ACCOUNT") ||
+         upperSnippet.includes("BUYER ACCOUNT")) &&
         !upperSnippet.includes("BENEFICIARY");
 
       const tiered = parseTieredFee(snippet, numericLcAmount);
@@ -738,7 +761,7 @@ export function auditLcText(text: string, settings?: UserSettings): LcAuditResul
           feeVal = parseFloat(docSettleMatch[1]);
           feeType = 'Document Settlement Charge';
         } else {
-          const amtM = snippet.match(/(?:(?:USD|EUR|GBP)\s*(\d{2,3}(?:\.\d{2})?)|(?:CHARGE|FEE|COMMISSION|COST|DEDUCT(?:ED)?|OF|AT)\s+(?:USD|EUR|GBP)?\s*(\d{2,3}(?:\.\d{2})?)|(\d{2,3}(?:\.\d{2})?)\s*(?:USD|EUR|GBP))\b/i);
+          const amtM = snippet.match(/(?:(?:USD|EUR|GBP)[\s\.]*(\d{1,3}(?:\.\d{2})?)|(?:CHARGE|FEE|COMMISSION|COST|DEDUCT(?:ED)?|OF|AT|FOR)\s+(?:USD|EUR|GBP)?[\s\.]*(\d{1,3}(?:\.\d{2})?)|(\d{1,3}(?:\.\d{2})?)\s*(?:USD|EUR|GBP))\b/i);
           if (amtM) feeVal = parseFloat(amtM[1] || amtM[2] || amtM[3]);
         }
       }
@@ -1300,23 +1323,31 @@ export function auditLcText(text: string, settings?: UserSettings): LcAuditResul
   // These are standard acceptable terms and should NOT be flagged as errors or issues.
   // We ONLY flag if an abnormal/risky calculation trigger is used, such as "FROM THE DATE OF DELIVERY"
   // or "FROM THE DATE OF GOODS ARRIVAL" (which violates UCP 600 negotiation).
-  const tenorMatch = normalizedText.match(/(?:F42C:\s*Drafts\s*(?:at)?\s*(?:\.{1,3}|…)?|:42C:)\s*[:#]?\s*([^\n]+)/i);
-  if (tenorMatch) {
-    const tenorText = tenorMatch[1].replace(/\s+/g, ' ').trim();
+  const tenorMatch = normalizedText.match(/(?:(?:\b|\n)\s*(?::?|F)?42C\b\s*:\s*(?:Drafts\s*(?:at)?\s*(?:\.{1,3}|…)?|[^\n:]*[:#]?)?)\s*\n?([\s\S]{1,150}?)(?=(?:\n\s*(?::?|F)?[0-9]{2}[A-Z]?\s*:|\n\s*--- PAGE BREAK ---\s*\n|$))/i);
+  const maturityClauseMatch = normalizedText.match(/(?:MATURITY\s*DATE\s*(?:WILL\s*BE\s*)?COUNTED\s*FROM\s*(?:THE\s*DATE\s*OF\s*)?(?:DE[LV]IVERY|RECEIPT|ARRIVAL)[^\n.]*)/i);
+
+  if (tenorMatch || maturityClauseMatch) {
+    const tenorText = tenorMatch ? tenorMatch[1].replace(/\s+/g, ' ').trim() : '';
     const upperTenor = tenorText.toUpperCase();
+    const hasAbnormalTenor = upperTenor.includes('DATE OF DELIVERY') ||
+                             upperTenor.includes('DATE OF DEVIVERY') ||
+                             upperTenor.includes('DATE OF GOODS RECEIPT') ||
+                             upperTenor.includes('ARRIVAL') ||
+                             Boolean(maturityClauseMatch);
 
     // Flag abnormal tenor condition: e.g. "FROM THE DATE OF DELIVERY"
-    if (upperTenor.includes('DATE OF DELIVERY') || upperTenor.includes('DATE OF GOODS RECEIPT') || upperTenor.includes('ARRIVAL')) {
+    if (hasAbnormalTenor) {
+      const detectedClause = maturityClauseMatch ? maturityClauseMatch[0].trim() : `Drafts at: ${tenorText}`;
       issues.push({
         id: 'issue_draft_tenor_delivery',
         correctionId: 'draft_tenor_correction',
         title: 'Risky Draft Tenor (Counted From Date of Delivery)',
-        clauseLocation: 'Field 42C',
+        clauseLocation: tenorMatch ? 'Field 42C' : resolveClauseLocation('Field 47A', detectedClause),
         severity: 'critical',
-        reason: `LC draft tenor states: "${tenorText}". Tenor counted from delivery date violates UCP 600 standards. It must be amended to standard "from the date of acceptance" or "from bill of exchange date".`,
-        detectedText: `Drafts at: ${tenorText}`,
+        reason: `LC specifies tenor / maturity date counted from delivery date ("${tenorText || detectedClause}"). Tenor counted from delivery date violates UCP 600 standards. It must be amended to standard "from the date of acceptance" or "from bill of exchange date".`,
+        detectedText: tenorText ? `Drafts at: ${tenorText}${maturityClauseMatch ? ` | ${maturityClauseMatch[0].trim()}` : ''}` : detectedClause,
         suggestedDetails: {
-          currentTenor: tenorText,
+          currentTenor: tenorText || detectedClause,
           requiredTenor: '120 DAYS FROM THE DATE OF ACCEPTANCE'
         }
       });
@@ -1324,15 +1355,13 @@ export function auditLcText(text: string, settings?: UserSettings): LcAuditResul
     // Note: Standard "120 DAYS FROM THE DATE OF ACCEPTANCE", "90 DAYS...", "AT SIGHT" etc. are ACCEPTABLE and NOT flagged.
   }
 
-
-
   // ==========================================
   // RULE 7E: Missing Overdue Interest Clause Check (ONLY for Usance / Deferred LCs)
   // ==========================================
   // AT SIGHT LCs: Payment is due immediately upon compliant documents. Overdue clause is NOT required.
   // Usance / Deferred LCs: Payment is deferred (30/60/90/120/180 days). Overdue interest clause IS required.
-  const f42cMatch = normalizedText.match(/(?:F42C:\s*Drafts\s*(?:at)?\s*(?:\.{1,3}|…)?|:42C:|F42P:[^\n]*|:42P:[^\n]*)\s*[:#]?\s*\n?\s*([^\n]+)/i);
-  const tenorFieldText = f42cMatch ? f42cMatch[1].toUpperCase() : '';
+  const f42cMatch = normalizedText.match(/(?:(?:\b|\n)\s*(?::?|F)?42[CP]\b[^\n:]*[:#]?)\s*\n?([\s\S]{1,150}?)(?=(?:\n\s*(?::?|F)?[0-9]{2}[A-Z]?\s*:|\n\s*--- PAGE BREAK ---\s*\n|$))/i);
+  const tenorFieldText = f42cMatch ? f42cMatch[1].replace(/\s+/g, ' ').toUpperCase() : '';
 
   const isAtSight = tenorFieldText.includes('AT SIGHT') ||
                     (upper.includes('AT SIGHT') && !/\b(?:30|60|90|120|150|180)\s*DAYS\b/i.test(tenorFieldText));
@@ -1342,6 +1371,7 @@ export function auditLcText(text: string, settings?: UserSettings): LcAuditResul
     upper.includes('AFTER ACCEPTANCE') ||
     upper.includes('FROM THE DATE OF ACCEPTANCE') ||
     upper.includes('FROM THE DATE OF DELIVERY') ||
+    upper.includes('FROM THE DATE OF DEVIVERY') ||
     upper.includes('SIGHT FROM THE DATE')
   );
 
@@ -1352,12 +1382,13 @@ export function auditLcText(text: string, settings?: UserSettings): LcAuditResul
 
   const hasOverdueClause =
     /OVER\s*DUE\s*(?:INTEREST|CHARGE|CLAUSE|RATE|COMMISSION|PERIOD)/i.test(relevantLcBody) ||
-    /OVER\s*DUE[\s\S]{0,40}?(?:\d+(?:\.\d+)?%|MATURITY|PER\s+ANNUM|P\.?A\.?|ACCEPTANCE)/i.test(relevantLcBody) ||
-    /(?:\d+(?:\.\d+)?%|PER\s+ANNUM|P\.?A\.?|INTEREST|ADDITIONAL\s+AMOUNT)[\s\S]{0,60}?OVER\s*DUE/i.test(relevantLcBody) ||
+    /OVER\s*DUE[\s\S]{0,40}?(?:\d+(?:\.\d+)?\s*(?:%|PCT)|MATURITY|PER\s+ANNUM|P\.?A\.?|PER\s+MONTH|P\.?M\.?|ACCEPTANCE)/i.test(relevantLcBody) ||
+    /(?:\d+(?:\.\d+)?\s*(?:%|PCT)|PER\s+ANNUM|P\.?A\.?|PER\s+MONTH|P\.?M\.?|INTEREST|ADDITIONAL\s+AMOUNT)[\s\S]{0,60}?OVER\s*DUE/i.test(relevantLcBody) ||
     /(?:DELAYED\s+PAYMENT|LATE\s+PAYMENT)\s+INTEREST/i.test(relevantLcBody) ||
     /INTEREST\s+(?:FOR|ON)\s+DELAYED\s+PAYMENT/i.test(relevantLcBody) ||
+    /INTEREST\s+WILL\s+BE\s+\d+(?:\.\d+)?\s*(?:%|PCT)/i.test(relevantLcBody) ||
     /INTEREST\s+BEYOND\s+MATURITY/i.test(relevantLcBody) ||
-    (/OVER\s*DUE/i.test(relevantLcBody) && (upperBody.includes('RATE') || upperBody.includes('PAY') || upperBody.includes('PAID') || upperBody.includes('MATURITY') || upperBody.includes('PERIOD') || upperBody.includes('%')));
+    (/OVER\s*DUE/i.test(relevantLcBody) && (upperBody.includes('RATE') || upperBody.includes('PAY') || upperBody.includes('PAID') || upperBody.includes('MATURITY') || upperBody.includes('PERIOD') || upperBody.includes('%') || upperBody.includes('PCT')));
 
   // Check for benchmark interest terms like SOFR / LIBOR
   const hasBenchmarkInterest = upperBody.includes('SOFR') ||
@@ -1512,8 +1543,8 @@ export function auditLcText(text: string, settings?: UserSettings): LcAuditResul
 
 function extractLcNumber(text: string): string | undefined {
   // SWIFT Tag 20 or F20 (with colon or newline)
-  const match20 = text.match(/(?::20:|F20:\s*Documentary\s*Credit\s*Number|\bF20:)[^\n:]*[:#]?\s*([A-Za-z0-9\-\/]{4,30})/i);
-  if (match20) return match20[1].trim();
+  const match20 = text.match(/(?:(?:\b|\n)\s*(?::?|F)?20\b[^\n:]*(?:Documentary\s*Credit\s*Number)?[^\n:]*[:#]?)\s*\n?\s*([A-Za-z0-9\-\/]{4,30})/i);
+  if (match20 && !/^Documentary$/i.test(match20[1])) return match20[1].trim();
 
   // Label patterns
   const matchLabel = text.match(/(?:DOCUMENTARY\s*CREDIT\s*NUMBER|CREDIT\s*NUMBER|L\/C\s*NO\.?|LC\s*NO\.?)\s*[:#]?\s*([A-Za-z0-9\-\/]{4,30})/i);
@@ -1576,32 +1607,33 @@ function parseFlexibleDate(dateStr: string): Date | null {
 }
 
 function extractAmount(text: string): { currency?: string; amount?: string } {
-  // Case 1: Look directly around :32B: or F32B:
+  // Case 1: Look directly around :32B: or F32B: or 32B:
   // SWIFT MT700 field 32B format: :32B:YYMMDD[CUR][AMOUNT] or :32B: Currency Code, Amount\nUSD20935,
   // or F32B: Currency: USD Amount: 11125,00 #11125,00#
-  const tag32bMatch = text.match(/(?::32B:|F32B:[^\n]*Currency[^\n]*)[^\n]*\n?([\s\S]{1,150}?(?=\n:[0-9]{2}|\nF[0-9]{2}|$))/i);
+  const tag32bMatch = text.match(/(?:(?:\b|\n)\s*(?::?|F)?32B\b[^\n:]*[:#]?)[^\n]*\n?([\s\S]{1,150}?(?=(?:\n\s*(?::?|F)?[0-9]{2}[A-Z]?\s*:|\n\s*--- PAGE BREAK ---\s*\n|$)))/i);
   if (tag32bMatch) {
     const block = tag32bMatch[1];
     
-    // Check if currency code exists in block
-    const currMatch = block.match(/\b(USD|EUR|GBP|BDT|JPY|CNY|CHF)\b/i);
+    // Check if currency code exists in block (including directly attached to amount e.g. USD50,512.500)
+    const currMatch = block.match(/(?:^|\b)(USD|EUR|GBP|BDT|JPY|CNY|CHF)(?=\s|\d|[.,]|$)/i);
     if (currMatch) {
       const currency = currMatch[1].toUpperCase();
       // Extract amount following the currency or Amount: keyword
       const afterCurrency = block.substring(currMatch.index! + currMatch[0].length);
-      const amtMatch = afterCurrency.match(/\s*(?:Amount:\s*)?#?([0-9]{1,3}(?:[.,][0-9]{3})*(?:[.,][0-9]{2})|[0-9]+(?:[.,][0-9]{2})|[0-9]+)/i) ||
-                       block.match(/Amount:\s*#?([0-9]{1,3}(?:[.,][0-9]{3})*(?:[.,][0-9]{2})|[0-9]+(?:[.,][0-9]{2})|[0-9]+)/i);
+      const amtMatch = afterCurrency.match(/\s*(?:Amount:\s*)?#?([0-9]{1,3}(?:[.,][0-9]{3})*(?:[.,][0-9]{2,3})|[0-9]+(?:[.,][0-9]{2,3})|[0-9]+)/i) ||
+                       block.match(/Amount:\s*#?([0-9]{1,3}(?:[.,][0-9]{3})*(?:[.,][0-9]{2,3})|[0-9]+(?:[.,][0-9]{2,3})|[0-9]+)/i);
       if (amtMatch) {
         let rawAmt = amtMatch[1].trim();
         // Check if comma is used as decimal separator (e.g. 11125,00 or 11.125,00)
-        if (/,\d{2}$/.test(rawAmt) && !rawAmt.includes('.')) {
+        if (/,\d{2,3}$/.test(rawAmt) && !rawAmt.includes('.')) {
           rawAmt = rawAmt.replace(/\./g, '').replace(',', '.');
         } else {
           rawAmt = rawAmt.replace(/,/g, '');
         }
+        const parsed = parseFloat(rawAmt);
         return {
           currency,
-          amount: rawAmt
+          amount: !isNaN(parsed) ? parsed.toFixed(2) : rawAmt
         };
       }
     }
@@ -1640,7 +1672,8 @@ function extractParty(text: string, regex: RegExp): string | undefined {
       if (/^Page \d+ of \d+/i.test(line)) return false;
       if (/^Name and Address:?$/i.test(line)) return false;
       if (/^Identifier Code:?$/i.test(line)) return false;
-      if (/^:[0-9]{2}[A-Z]?:/i.test(line)) return false;
+      if (/^(?:Applicant|Beneficiary(?:\s+Name(?:\s+And\s+Address)?)?):?$/i.test(line)) return false;
+      if (/^:?[0-9]{2}[A-Z]?:/i.test(line)) return false;
       if (/^F[0-9]{2}[A-Z]?:/i.test(line)) return false;
       return true;
     });
