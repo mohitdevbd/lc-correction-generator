@@ -1,15 +1,12 @@
 import * as pdfjsLib from 'pdfjs-dist';
+import pdfWorker from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
 import type { LcAuditResult, LcAuditIssue, UserSettings, ChargeBreakdown, ChargePayerItem } from '../types';
 
-// Set up pdf.js worker using web worker URL
-try {
-  pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
-    'pdfjs-dist/build/pdf.worker.min.mjs',
-    import.meta.url
-  ).toString();
-} catch {
-  // Fallback for non-standard environments
-  pdfjsLib.GlobalWorkerOptions.workerSrc = `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjsLib.version}/pdf.worker.min.mjs`;
+// Set up pdf.js worker using Vite's static asset URL with CDN fallbacks
+if (typeof window !== 'undefined') {
+  pdfjsLib.GlobalWorkerOptions.workerSrc =
+    pdfWorker ||
+    `https://unpkg.com/pdfjs-dist@${pdfjsLib.version}/build/pdf.worker.min.mjs`;
 }
 
 export interface PdfExtractProgress {
@@ -57,8 +54,21 @@ export async function extractTextFromPdf(
   onProgress?: (info: PdfExtractProgress) => void
 ): Promise<string> {
   const arrayBuffer = await file.arrayBuffer();
-  const loadingTask = pdfjsLib.getDocument({ data: new Uint8Array(arrayBuffer) });
-  const pdfDocument = await loadingTask.promise;
+  let pdfDocument;
+  try {
+    const loadingTask = pdfjsLib.getDocument({
+      data: new Uint8Array(arrayBuffer),
+      useWorkerFetch: true
+    });
+    pdfDocument = await loadingTask.promise;
+  } catch (pdfErr: any) {
+    console.error('PDF parsing error:', pdfErr);
+    if (pdfErr?.name === 'PasswordException' || /password/i.test(pdfErr?.message || '')) {
+      throw new Error('This PDF is password protected. Please remove the password and re-upload.');
+    }
+    throw new Error(`Failed to parse PDF document (${pdfErr?.message || 'Invalid or corrupted file'}).`);
+  }
+
   const numPages = pdfDocument.numPages;
   const pageTexts: string[] = [];
 
@@ -111,60 +121,69 @@ export async function extractTextFromPdf(
     return nativeText;
   }
 
-  const { createWorker } = await import('tesseract.js');
-  let currentOcrPage = 1;
-  onProgress?.({
-    status: `Scanned PDF detected — Preparing OCR for ${numPages} page${numPages > 1 ? 's' : ''}...`,
-    page: 1,
-    totalPages: numPages,
-    progressPercent: 5
-  });
-
-  const worker = await createWorker('eng', 1, {
-    logger: (m: any) => {
-      if (m.status === 'recognizing text' && typeof m.progress === 'number') {
-        const overall = Math.round(((currentOcrPage - 1 + m.progress) / numPages) * 100);
-        onProgress?.({
-          status: `Scanned PDF OCR: Page ${currentOcrPage} of ${numPages} (${Math.round(m.progress * 100)}%)...`,
-          page: currentOcrPage,
-          totalPages: numPages,
-          progressPercent: overall
-        });
-      }
-    }
-  });
-
   const ocrPageTexts: string[] = [];
   try {
-    for (let pageNum = 1; pageNum <= numPages; pageNum++) {
-      currentOcrPage = pageNum;
-      onProgress?.({
-        status: `Scanned PDF OCR: Rendering page ${pageNum} of ${numPages}...`,
-        page: pageNum,
-        totalPages: numPages,
-        progressPercent: Math.round(((pageNum - 1) / numPages) * 100)
-      });
+    const { createWorker } = await import('tesseract.js');
+    let currentOcrPage = 1;
+    onProgress?.({
+      status: `Scanned PDF detected — Initializing OCR for ${numPages} page${numPages > 1 ? 's' : ''}...`,
+      page: 1,
+      totalPages: numPages,
+      progressPercent: 5
+    });
 
-      const page = await pdfDocument.getPage(pageNum);
-      const viewport = page.getViewport({ scale: 2.2 });
-      const canvas = document.createElement('canvas');
-      canvas.width = viewport.width;
-      canvas.height = viewport.height;
-      const context = canvas.getContext('2d');
-      if (!context) continue;
-
-      context.fillStyle = '#ffffff';
-      context.fillRect(0, 0, canvas.width, canvas.height);
-
-      await page.render({ canvas, canvasContext: context, viewport }).promise;
-
-      const { data: { text } } = await worker.recognize(canvas);
-      if (text && text.trim()) {
-        ocrPageTexts.push(text.trim());
+    const worker = await createWorker('eng', 1, {
+      logger: (m: any) => {
+        if (m.status === 'recognizing text' && typeof m.progress === 'number') {
+          const overall = Math.round(((currentOcrPage - 1 + m.progress) / numPages) * 100);
+          onProgress?.({
+            status: `Scanned PDF OCR: Page ${currentOcrPage} of ${numPages} (${Math.round(m.progress * 100)}%)...`,
+            page: currentOcrPage,
+            totalPages: numPages,
+            progressPercent: overall
+          });
+        }
       }
+    });
+
+    try {
+      for (let pageNum = 1; pageNum <= numPages; pageNum++) {
+        currentOcrPage = pageNum;
+        onProgress?.({
+          status: `Scanned PDF OCR: Rendering page ${pageNum} of ${numPages}...`,
+          page: pageNum,
+          totalPages: numPages,
+          progressPercent: Math.round(((pageNum - 1) / numPages) * 100)
+        });
+
+        const page = await pdfDocument.getPage(pageNum);
+        const viewport = page.getViewport({ scale: 2.0 });
+        const canvas = document.createElement('canvas');
+        canvas.width = Math.floor(viewport.width);
+        canvas.height = Math.floor(viewport.height);
+        const context = canvas.getContext('2d');
+        if (!context) continue;
+
+        context.fillStyle = '#ffffff';
+        context.fillRect(0, 0, canvas.width, canvas.height);
+
+        await page.render({ canvas, canvasContext: context, viewport }).promise;
+
+        const dataUrl = canvas.toDataURL('image/jpeg', 0.92);
+        const { data: { text } } = await worker.recognize(dataUrl);
+        if (text && text.trim()) {
+          ocrPageTexts.push(text.trim());
+        }
+      }
+    } finally {
+      await worker.terminate();
     }
-  } finally {
-    await worker.terminate();
+  } catch (ocrErr: any) {
+    console.error('OCR scanning error:', ocrErr);
+    if (ocrPageTexts.length > 0) {
+      return ocrPageTexts.join('\n\n--- PAGE BREAK ---\n\n');
+    }
+    throw new Error(`Scanned PDF OCR failed: ${ocrErr?.message || 'Unable to process document images'}.`);
   }
 
   return ocrPageTexts.join('\n\n--- PAGE BREAK ---\n\n');

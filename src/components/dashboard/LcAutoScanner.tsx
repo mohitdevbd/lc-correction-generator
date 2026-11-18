@@ -115,7 +115,21 @@ export const LcAutoScanner: React.FC<LcAutoScannerProps> = ({
 
     try {
       const lowerName = file.name.toLowerCase();
-      if (file.type === 'application/pdf' || lowerName.endsWith('.pdf')) {
+      let isPdf = file.type === 'application/pdf' || lowerName.endsWith('.pdf');
+      
+      // If MIME type and extension are missing, check file magic bytes for PDF (%PDF)
+      if (!isPdf) {
+        try {
+          const header = await file.slice(0, 5).text();
+          if (header.startsWith('%PDF')) {
+            isPdf = true;
+          }
+        } catch {
+          // ignore slice error
+        }
+      }
+
+      if (isPdf) {
         const extractedText = await extractTextFromPdf(file, (info) => {
           setScanStatus(info.status);
         });
@@ -137,7 +151,15 @@ export const LcAutoScanner: React.FC<LcAutoScannerProps> = ({
         handleProcessText(text, file.name);
       }
     } catch (err: any) {
-      setErrorMsg('Could not read file. Make sure it is not password protected.');
+      console.error('File scan error:', err);
+      const msg = err?.message || '';
+      if (/password/i.test(msg)) {
+        setErrorMsg('The document is password-protected. Please remove the password and try again.');
+      } else if (msg) {
+        setErrorMsg(msg);
+      } else {
+        setErrorMsg('Could not read file. Make sure it is not corrupted or password protected.');
+      }
       setIsAnalyzing(false);
       setScanStatus(null);
     }
